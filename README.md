@@ -115,6 +115,10 @@ Open the repository:
 Actions -> Quark to Google Drive -> Run workflow
 ```
 
+GitHub-hosted runners for a private repository require available Actions
+minutes and a valid billing/spending-limit state. If the job fails before any
+step starts, check `https://github.com/settings/billing/actions`.
+
 Fill exactly one source selector:
 
 - `query`: filename substring, for example `武忠祥`.

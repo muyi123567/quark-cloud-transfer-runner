@@ -76,6 +76,16 @@ The repository includes:
 - GitHub Actions secret availability and repository workflow execution.
 - End-to-end transfer of a real small file.
 
+On 2026-09-24 the first workflow dispatch was rejected before step startup:
+
+```text
+The job was not started because recent account payments have failed or your
+spending limit needs to be increased.
+```
+
+This is a GitHub account billing condition, not a runtime-code failure. The
+workflow can be re-run after the billing state is corrected.
+
 Status: `READY_FOR_GITHUB_ACTIONS_SMOKE_TEST`.
 
 ## Required first smoke test
