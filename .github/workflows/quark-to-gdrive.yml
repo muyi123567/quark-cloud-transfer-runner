@@ -60,6 +60,7 @@ concurrency:
 
 jobs:
   transfer:
+    if: github.event_name == 'workflow_dispatch' || github.actor == 'muyi123567'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
