@@ -126,6 +126,32 @@ gh secret set GDRIVE_ROOT_FOLDER_ID --body "<folder-id>"
 
 When unset, the runner uses the Drive account root.
 
+## ChatGPT direct trigger
+
+In addition to the GitHub `Run workflow` button, a trusted writer can update
+`requests/current.json` on `main`. That single commit automatically starts
+the same workflow. The push-triggered job is owner-gated to `muyi123567`, so
+public forks or untrusted actors cannot use this path to run with repository
+secrets.
+
+Example:
+
+```json
+{
+  "query": "武忠祥",
+  "source_path": "",
+  "source_fid": "",
+  "destination": "考研_AI_KB/01_SOURCE_INBOX/数学",
+  "dry_run": true,
+  "max_files": 10,
+  "chunk_mib": 16,
+  "duplicate_policy": "skip"
+}
+```
+
+Exactly one of `query`, `source_path`, or `source_fid` must be non-empty.
+Credentials never belong in this file; they remain in GitHub Actions Secrets.
+
 ## Run a transfer
 
 Open the operational runner repository:
