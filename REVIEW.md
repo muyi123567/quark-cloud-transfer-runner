@@ -76,17 +76,38 @@ The repository includes:
 - GitHub Actions secret availability and repository workflow execution.
 - End-to-end transfer of a real small file.
 
-On 2026-09-24 the first workflow dispatch was rejected before step startup:
+On 2026-09-24 the first private-repository workflow dispatch was rejected
+before step startup:
 
 ```text
 The job was not started because recent account payments have failed or your
 spending limit needs to be increased.
 ```
 
-This is a GitHub account billing condition, not a runtime-code failure. The
-workflow can be re-run after the billing state is corrected.
+This is a GitHub account billing condition, not a runtime-code failure. A
+public runner repository was created at
+`https://github.com/muyi123567/quark-cloud-transfer-runner`; it contains only
+the generic runtime code, while credentials remain encrypted GitHub Actions
+secrets.
 
-Status: `READY_FOR_GITHUB_ACTIONS_SMOKE_TEST`.
+## End-to-end verification
+
+Successful public-runner execution:
+
+```text
+https://github.com/muyi123567/quark-cloud-transfer-runner/actions/runs/35992982264
+```
+
+Observed result:
+
+- Source file: `27考研数学武忠祥《高数基础篇》...pdf`
+- Source size: `155479921` bytes
+- Quark Range support: `true`
+- Drive file ID: `1_iS6Y8WUEfjgY0dHsO_3aqghhZmnYGoB`
+- Destination parent: `数学` (`1GNhYAEV5bXfEvTEfrxgds-7npJSda2al`)
+- Final Drive size: `155479921` bytes
+
+Status: `END_TO_END_VERIFIED`.
 
 ## Required first smoke test
 

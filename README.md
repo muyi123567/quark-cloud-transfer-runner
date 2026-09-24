@@ -13,6 +13,25 @@ Quark Web API
 This repository is intentionally a `PLATFORM_RUNTIME_ASSET`. It is not a
 canonical Skill and must not be registered in the Kaoyan `SKILL_MANIFEST`.
 
+## Execution repository
+
+The private source repository is:
+
+```text
+https://github.com/muyi123567/quark-cloud-transfer
+```
+
+GitHub currently blocks private-repository hosted runners for this account due
+to its billing state. The operational runner is therefore the public repository:
+
+```text
+https://github.com/muyi123567/quark-cloud-transfer-runner
+```
+
+The public repository contains only the generic runtime code. `QUARK_COOKIE`
+and `GDRIVE_OAUTH_JSON` are still stored as encrypted GitHub Actions secrets.
+Use the public runner repository to start transfers.
+
 ## What is implemented
 
 - Quark Web cookie injection through GitHub Actions secrets.
@@ -109,11 +128,13 @@ When unset, the runner uses the Drive account root.
 
 ## Run a transfer
 
-Open the repository:
+Open the operational runner repository:
 
 ```text
-Actions -> Quark to Google Drive -> Run workflow
+https://github.com/muyi123567/quark-cloud-transfer-runner/actions/workflows/quark-to-gdrive.yml
 ```
+
+Then choose `Run workflow`.
 
 GitHub-hosted runners for a private repository require available Actions
 minutes and a valid billing/spending-limit state. If the job fails before any
