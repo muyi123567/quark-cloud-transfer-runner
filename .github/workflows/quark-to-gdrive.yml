@@ -1,0 +1,95 @@
+name: Quark to Google Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: Quark filename substring. Leave source_path and source_fid empty.
+        required: false
+        type: string
+      source_path:
+        description: Exact Quark path to a file or folder.
+        required: false
+        type: string
+      source_fid:
+        description: Exact 32-character Quark Web FID.
+        required: false
+        type: string
+      destination:
+        description: Google Drive folder path below the configured root.
+        required: true
+        type: string
+      dry_run:
+        description: Resolve and report the plan without writing to Drive.
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      max_files:
+        description: Safety limit for one run.
+        required: true
+        default: "10"
+        type: string
+      chunk_mib:
+        description: Streaming chunk size in MiB. Must be a multiple of 0.25 MiB.
+        required: true
+        default: "16"
+        type: string
+      duplicate_policy:
+        description: Same name and same size always skip; different size follows this policy.
+        required: true
+        default: skip
+        type: choice
+        options:
+          - skip
+          - rename
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quark-to-gdrive
+  cancel-in-progress: false
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      QUARK_COOKIE: ${{ secrets.QUARK_COOKIE }}
+      GDRIVE_OAUTH_JSON: ${{ secrets.GDRIVE_OAUTH_JSON }}
+      GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime
+        run: python -m pip install .
+
+      - name: Run self-test
+        run: python scripts/self_test.py
+
+      - name: Run transfer
+        env:
+          SOURCE_QUERY: ${{ inputs.query }}
+          SOURCE_PATH: ${{ inputs.source_path }}
+          SOURCE_FID: ${{ inputs.source_fid }}
+          DESTINATION: ${{ inputs.destination }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          MAX_FILES: ${{ inputs.max_files }}
+          CHUNK_MIB: ${{ inputs.chunk_mib }}
+          DUPLICATE_POLICY: ${{ inputs.duplicate_policy }}
+        run: |
+          args=(--destination "$DESTINATION" --max-files "$MAX_FILES" --chunk-mib "$CHUNK_MIB" --duplicate-policy "$DUPLICATE_POLICY")
+          if [ -n "$SOURCE_QUERY" ]; then args+=(--query "$SOURCE_QUERY"); fi
+          if [ -n "$SOURCE_PATH" ]; then args+=(--source-path "$SOURCE_PATH"); fi
+          if [ -n "$SOURCE_FID" ]; then args+=(--source-fid "$SOURCE_FID"); fi
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          python -m quark_cloud_transfer.cli "${args[@]}"

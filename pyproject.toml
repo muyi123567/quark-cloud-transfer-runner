@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quark-cloud-transfer"
+version = "0.1.0"
+description = "Stream files from Quark Drive to Google Drive through GitHub Actions."
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31,<3",
+]
+
+[project.scripts]
+quark-cloud-transfer = "quark_cloud_transfer.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
