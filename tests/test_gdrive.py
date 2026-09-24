@@ -17,6 +17,7 @@ class FakeResponse:
         self._payload = payload or {}
         self.headers = headers or {}
         self.ok = 200 <= status_code < 300
+        self.text = ""
 
     def json(self) -> dict[str, Any]:
         return self._payload

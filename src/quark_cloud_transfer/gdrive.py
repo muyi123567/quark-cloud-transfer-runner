@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from .errors import DriveError
+from .redaction import redact_text
 
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3"
@@ -18,6 +19,14 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 
 def escape_q(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _drive_error(operation: str, response: requests.Response) -> DriveError:
+    detail = redact_text(getattr(response, "text", "") or "").strip()
+    if detail:
+        detail = detail[:500]
+        return DriveError(f"{operation} failed with HTTP {response.status_code}: {detail}")
+    return DriveError(f"{operation} failed with HTTP {response.status_code}")
 
 
 class GoogleDriveClient:
@@ -120,7 +129,7 @@ class GoogleDriveClient:
             },
         )
         if not response.ok:
-            raise DriveError(f"Google Drive list failed with HTTP {response.status_code}")
+            raise _drive_error("Google Drive list", response)
         return list(response.json().get("files") or [])
 
     def create_folder(self, parent_id: str, name: str) -> str:
@@ -132,9 +141,7 @@ class GoogleDriveClient:
             json={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]},
         )
         if not response.ok:
-            raise DriveError(
-                f"Google Drive folder creation failed with HTTP {response.status_code}"
-            )
+            raise _drive_error("Google Drive folder creation", response)
         folder_id = response.json().get("id")
         if not folder_id:
             raise DriveError("Google Drive folder creation returned no id")
@@ -201,9 +208,7 @@ class GoogleDriveClient:
         )
         location = response.headers.get("Location")
         if not response.ok or not location:
-            raise DriveError(
-                f"Failed to initiate Drive resumable upload with HTTP {response.status_code}"
-            )
+            raise _drive_error("Failed to initiate Drive resumable upload", response)
         return location
 
     def put_chunk(
@@ -251,7 +256,5 @@ class GoogleDriveClient:
             },
         )
         if not response.ok:
-            raise DriveError(
-                f"Google Drive verification failed with HTTP {response.status_code}"
-            )
+            raise _drive_error("Google Drive verification", response)
         return dict(response.json())
