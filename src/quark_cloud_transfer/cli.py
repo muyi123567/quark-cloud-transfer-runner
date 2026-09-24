@@ -11,7 +11,6 @@ from .config import (
     DEFAULT_MAX_NODES,
     load_settings,
 )
-from .errors import QuarkCloudTransferError
 from .gdrive import GoogleDriveClient
 from .quark import QuarkClient
 from .redaction import redact_text
@@ -87,7 +86,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             root_fid=args.quark_root_fid,
         )
         return 0
-    except (QuarkCloudTransferError, ValueError) as exc:
+    except Exception as exc:
         emit("error", message=redact_text(exc))
         return 2
 
