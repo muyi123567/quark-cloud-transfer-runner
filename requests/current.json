@@ -1,0 +1,10 @@
+{
+  "query": "27考研数学武忠祥《高数基础篇》",
+  "source_path": "",
+  "source_fid": "",
+  "destination": "考研_AI_KB/01_SOURCE_INBOX/数学",
+  "dry_run": true,
+  "max_files": 3,
+  "chunk_mib": 16,
+  "duplicate_policy": "skip"
+}
