@@ -213,3 +213,76 @@ No complete source file is written to the runner filesystem.
   suspected.
 
 See [SECURITY.md](SECURITY.md) and [REVIEW.md](REVIEW.md).
+
+
+## Conditional PDF preprocessing
+
+The same GitHub Actions runner also contains a **conditional** PDF preprocessor:
+
+```text
+.github/workflows/pdf-preprocess.yml
+scripts/preprocess_pdf.py
+```
+
+It is intentionally **not** the default path for every PDF.
+
+Default policy (`mode=auto`):
+
+```text
+not a PDF
+    -> NO_PREPROCESS_NEEDED
+
+PDF <= 95 MiB
+and no explicit upstream read failure
+    -> NO_PREPROCESS_NEEDED
+    -> send the original PDF directly to Gemini / Spark
+
+PDF > 95 MiB
+    -> PREPROCESS_REQUIRED
+    -> stream-download from Google Drive
+    -> inspect page count / embedded-text coverage
+    -> split into bounded PDF segments
+    -> upload segments + preprocess_manifest.json
+    -> Gemini / Spark continues semantic distillation
+
+PDF <= 95 MiB but upstream explicitly reports
+partial / inaccessible / direct-read-failed
+    -> PREPROCESS_REQUIRED
+```
+
+The threshold is configurable per run with `max_direct_mib`. The default 95 MiB
+keeps headroom below the ordinary Gemini per-file document limit.
+
+The preprocessor does **not** perform whole-book OCR by default. Its job is
+mechanical: obtain the original bytes, inspect the PDF, and split only when
+needed. Gemini remains responsible for visual/formula understanding on the
+bounded segments. A bounded segment may later receive targeted OCR if there is
+a demonstrated evidence gap.
+
+Manual override modes:
+
+- `auto`: use the policy above.
+- `always`: force preprocessing.
+- `never`: report only; never split.
+
+`force_reason` is the explicit escape hatch for an upstream failure signal.
+A non-empty value forces preprocessing in `auto` mode and is recorded in the
+worker output for provenance.
+
+Example for an oversized registered source:
+
+```text
+drive_file_id: <Drive file id>
+destination: 考研_AI_KB/02_SOURCE_ARCHIVE/books/<source-id>/segments
+source_id: <source-id>
+job_id: <job-id>
+mode: auto
+force_reason:
+max_direct_mib: 95
+target_chunk_mib: 70
+max_pages_per_chunk: 60
+```
+
+This worker reuses the existing `GDRIVE_OAUTH_JSON` and
+`GDRIVE_ROOT_FOLDER_ID` GitHub Actions secrets. No new Google credential is
+required.
