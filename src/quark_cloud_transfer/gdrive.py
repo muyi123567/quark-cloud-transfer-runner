@@ -246,6 +246,101 @@ class GoogleDriveClient:
             time.sleep(min(2**attempt, 30))
         raise DriveError(f"Drive chunk upload failed after {max_retries} retries")
 
+    def download_to_path(
+        self,
+        file_id: str,
+        destination_path: str,
+        *,
+        chunk_size: int = 8 * 1024 * 1024,
+    ) -> int:
+        """Stream a Drive file to ephemeral runner storage without base64 wrapping."""
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        response = self._request(
+            "GET",
+            DRIVE_API + f"/files/{file_id}",
+            params={"alt": "media", "supportsAllDrives": "true"},
+            stream=True,
+            timeout=max(self.timeout, 300),
+        )
+        if not response.ok:
+            raise _drive_error("Google Drive download", response)
+        written = 0
+        with open(destination_path, "wb") as fh:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if not chunk:
+                    continue
+                fh.write(chunk)
+                written += len(chunk)
+        return written
+
+    def upload_path(
+        self,
+        source_path: str,
+        parent_id: str,
+        *,
+        name: Optional[str] = None,
+        mime_type: str = "application/octet-stream",
+        chunk_size: int = 16 * 1024 * 1024,
+        on_exists: str = "skip",
+    ) -> Dict[str, Any]:
+        """Upload a local runner file with the existing resumable-upload path."""
+        if chunk_size <= 0 or chunk_size % (256 * 1024) != 0:
+            raise ValueError("chunk_size must be a positive multiple of 256 KiB")
+        size = os.path.getsize(source_path)
+        target_name = name or os.path.basename(source_path)
+        chosen_name, existing = self.choose_destination(
+            parent_id,
+            target_name,
+            size,
+            on_exists=on_exists,
+        )
+        if chosen_name is None:
+            assert existing is not None
+            return dict(existing)
+
+        session_url = self.initiate_upload(
+            chosen_name,
+            size,
+            parent_id,
+            mime_type,
+        )
+        offset = 0
+        final_response: Optional[requests.Response] = None
+        with open(source_path, "rb") as fh:
+            while offset < size:
+                data = fh.read(min(chunk_size, size - offset))
+                if not data:
+                    break
+                final_response = self.put_chunk(
+                    session_url,
+                    start=offset,
+                    total=size,
+                    data=data,
+                )
+                offset += len(data)
+
+        if offset != size:
+            raise DriveError(
+                f"Drive upload read {offset} bytes from a {size}-byte source"
+            )
+        if final_response is None or final_response.status_code not in (200, 201):
+            raise DriveError("Drive resumable upload did not return final metadata")
+        try:
+            payload = dict(final_response.json())
+        except ValueError as exc:
+            raise DriveError("Drive upload returned non-JSON final metadata") from exc
+        file_id = payload.get("id")
+        if not file_id:
+            raise DriveError("Drive upload returned no file id")
+        verified = self.get_file(str(file_id))
+        if str(verified.get("size", "")) != str(size):
+            raise DriveError(
+                f"Drive upload verification failed: expected {size} bytes, "
+                f"got {verified.get('size')!r}"
+            )
+        return verified
+
     def get_file(self, file_id: str) -> Dict[str, Any]:
         response = self._request(
             "GET",
