@@ -1,0 +1,155 @@
+name: Conditional PDF Preprocess
+
+on:
+  workflow_dispatch:
+    inputs:
+      drive_file_id:
+        description: Google Drive file ID for the source PDF.
+        required: true
+        type: string
+      destination:
+        description: Google Drive output folder path below the configured root.
+        required: true
+        type: string
+      source_id:
+        description: Optional SOURCE_REGISTRY source_id.
+        required: false
+        type: string
+      job_id:
+        description: Optional DISTILLATION_QUEUE job_id.
+        required: false
+        type: string
+      mode:
+        description: auto skips normal PDFs; always forces preprocessing; never only reports.
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - always
+          - never
+      force_reason:
+        description: Optional upstream failure/partial-read reason. Non-empty forces preprocessing in auto mode.
+        required: false
+        type: string
+      max_direct_mib:
+        description: PDFs at or below this size go directly to Gemini in auto mode.
+        required: true
+        default: "95"
+        type: string
+      target_chunk_mib:
+        description: Target maximum size for generated PDF segments.
+        required: true
+        default: "70"
+        type: string
+      max_pages_per_chunk:
+        description: Maximum pages per generated segment.
+        required: true
+        default: "60"
+        type: string
+      duplicate_policy:
+        description: Existing same-name output handling.
+        required: true
+        default: skip
+        type: choice
+        options:
+          - skip
+          - rename
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conditional-pdf-preprocess
+  cancel-in-progress: false
+
+jobs:
+  preprocess:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GDRIVE_OAUTH_JSON: ${{ secrets.GDRIVE_OAUTH_JSON }}
+      GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime
+        run: |
+          python -m pip install .
+          python -m pip install "pypdf>=5,<6"
+
+      - name: Validate inputs
+        env:
+          DRIVE_FILE_ID: ${{ inputs.drive_file_id }}
+          DESTINATION: ${{ inputs.destination }}
+          MODE: ${{ inputs.mode }}
+          MAX_DIRECT_MIB: ${{ inputs.max_direct_mib }}
+          TARGET_CHUNK_MIB: ${{ inputs.target_chunk_mib }}
+          MAX_PAGES_PER_CHUNK: ${{ inputs.max_pages_per_chunk }}
+        run: |
+          python - <<'PY'
+          import os
+
+          if not os.environ["DRIVE_FILE_ID"].strip():
+              raise SystemExit("drive_file_id is required")
+          if not os.environ["DESTINATION"].strip():
+              raise SystemExit("destination is required")
+          if os.environ["MODE"] not in {"auto", "always", "never"}:
+              raise SystemExit("invalid mode")
+          for key in ("MAX_DIRECT_MIB", "TARGET_CHUNK_MIB"):
+              try:
+                  value = float(os.environ[key])
+              except ValueError:
+                  raise SystemExit(f"{key} must be numeric")
+              if value <= 0:
+                  raise SystemExit(f"{key} must be positive")
+          try:
+              pages = int(os.environ["MAX_PAGES_PER_CHUNK"])
+          except ValueError:
+              raise SystemExit("MAX_PAGES_PER_CHUNK must be an integer")
+          if pages < 1 or pages > 200:
+              raise SystemExit("MAX_PAGES_PER_CHUNK must be between 1 and 200")
+          PY
+
+      - name: Decide and preprocess only when needed
+        env:
+          DRIVE_FILE_ID: ${{ inputs.drive_file_id }}
+          DESTINATION: ${{ inputs.destination }}
+          SOURCE_ID: ${{ inputs.source_id }}
+          JOB_ID: ${{ inputs.job_id }}
+          MODE: ${{ inputs.mode }}
+          FORCE_REASON: ${{ inputs.force_reason }}
+          MAX_DIRECT_MIB: ${{ inputs.max_direct_mib }}
+          TARGET_CHUNK_MIB: ${{ inputs.target_chunk_mib }}
+          MAX_PAGES_PER_CHUNK: ${{ inputs.max_pages_per_chunk }}
+          DUPLICATE_POLICY: ${{ inputs.duplicate_policy }}
+        run: |
+          python scripts/preprocess_pdf.py \
+            --drive-file-id "$DRIVE_FILE_ID" \
+            --destination "$DESTINATION" \
+            --source-id "$SOURCE_ID" \
+            --job-id "$JOB_ID" \
+            --mode "$MODE" \
+            --force-reason "$FORCE_REASON" \
+            --max-direct-mib "$MAX_DIRECT_MIB" \
+            --target-chunk-mib "$TARGET_CHUNK_MIB" \
+            --max-pages-per-chunk "$MAX_PAGES_PER_CHUNK" \
+            --duplicate-policy "$DUPLICATE_POLICY"
+
+      - name: Decision policy summary
+        run: |
+          {
+            echo "### Conditional PDF preprocess policy"
+            echo
+            echo "- Default mode: **auto**"
+            echo "- If PDF <= 95 MiB and no upstream failure signal: **do not unpack; send directly to Gemini**"
+            echo "- If PDF > configured direct limit: split into bounded PDF segments"
+            echo "- If force_reason is set (partial/inaccessible/direct-read-failed): preprocess even when smaller"
+            echo "- The worker does not run whole-book OCR by default"
+          } >> "$GITHUB_STEP_SUMMARY"
