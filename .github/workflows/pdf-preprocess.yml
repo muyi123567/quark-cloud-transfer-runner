@@ -84,6 +84,38 @@ jobs:
           python -m pip install .
           python -m pip install "pypdf>=5,<6"
 
+      - name: Policy self-test
+        run: |
+          python - <<'PY'
+          from scripts.preprocess_pdf import decide_preprocess
+
+          assert decide_preprocess(
+              size_bytes=40 * 1024 * 1024,
+              mode="auto",
+              force_reason="",
+              max_direct_mib=95,
+          ) == (False, "DIRECT_GEMINI_PREFERRED")
+          assert decide_preprocess(
+              size_bytes=155 * 1024 * 1024,
+              mode="auto",
+              force_reason="",
+              max_direct_mib=95,
+          )[0] is True
+          assert decide_preprocess(
+              size_bytes=40 * 1024 * 1024,
+              mode="auto",
+              force_reason="direct-read-failed",
+              max_direct_mib=95,
+          )[0] is True
+          assert decide_preprocess(
+              size_bytes=155 * 1024 * 1024,
+              mode="never",
+              force_reason="",
+              max_direct_mib=95,
+          )[0] is False
+          print("conditional preprocess policy: PASS")
+          PY
+
       - name: Validate inputs
         env:
           DRIVE_FILE_ID: ${{ inputs.drive_file_id }}
