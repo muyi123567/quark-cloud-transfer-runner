@@ -9,11 +9,12 @@ from .errors import QuarkError
 from .models import QuarkItem
 
 QUARK_BASE = "https://drive-pc.quark.cn/1/clouddrive"
-QUARK_DOWNLOAD = "https://drive.quark.cn/1/clouddrive/file/download"
+QUARK_DOWNLOAD = "https://drive-pc.quark.cn/1/clouddrive/file/download"
 QUARK_COMMON_QUERY = {"pr": "ucpro", "fr": "pc", "uc_param_str": ""}
 QUARK_UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/126.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 "
+    "Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch"
 )
 
 
