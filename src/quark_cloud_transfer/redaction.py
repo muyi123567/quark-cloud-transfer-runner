@@ -11,6 +11,11 @@ _PATTERNS = [
         r"(?i)((?:client_secret|authorization|cookie)[\"']?\s*[:=]\s*[\"']?)[^\"',;\s}]+"
     ),
     re.compile(r"(?i)(__puus=)[^;\s]+"),
+    re.compile(r"(?i)(__pus=)[^;\s]+"),
+    re.compile(
+        r"(?i)(https://[^/\s]+\.drive\.quark\.cn/[^?\s\"']+)\?[^\s\"']+"
+    ),
+    re.compile(r"(?i)([?&](?:auth_key|token|ork)=)[^&\s\"']+"),
 ]
 
 
