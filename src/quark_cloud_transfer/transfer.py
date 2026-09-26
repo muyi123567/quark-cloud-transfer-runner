@@ -134,8 +134,37 @@ class TransferService:
         self.emit("drive_folder_ready", destination=destination, folder_id=parent_id)
 
         results: list[TransferResult] = []
+        folder_cache: dict[str, str] = {"": parent_id}
+        source_root_path = ""
+        if source_path:
+            normalized_source = source_path.replace("\\", "/").rstrip("/")
+            source_root_name = normalized_source.rsplit("/", 1)[-1]
+            if source_root_name:
+                source_root_path = f"/{source_root_name}"
+
         for item in items:
-            results.append(self._transfer_one(item, parent_id))
+            item_parent_id = parent_id
+            if source_root_path and item.path.startswith(source_root_path + "/"):
+                relative_path = item.path[len(source_root_path) + 1 :]
+                relative_parent = (
+                    relative_path.rsplit("/", 1)[0]
+                    if "/" in relative_path
+                    else ""
+                )
+                if relative_parent:
+                    item_parent_id = folder_cache.get(relative_parent, "")
+                    if not item_parent_id:
+                        item_parent_id = self.drive.ensure_folder_path(
+                            relative_parent,
+                            root_id=parent_id,
+                        )
+                        folder_cache[relative_parent] = item_parent_id
+                        self.emit(
+                            "drive_subfolder_ready",
+                            source_relative_path=relative_parent,
+                            folder_id=item_parent_id,
+                        )
+            results.append(self._transfer_one(item, item_parent_id))
         self.emit(
             "complete",
             results=[
