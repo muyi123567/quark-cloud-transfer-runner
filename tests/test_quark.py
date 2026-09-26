@@ -14,11 +14,13 @@ class FakeResponse:
         status_code: int = 200,
         headers: dict[str, str] | None = None,
         chunks: list[bytes] | None = None,
+        cookies: dict[str, str] | None = None,
     ) -> None:
         self._payload = payload or {}
         self.status_code = status_code
         self.headers = headers or {}
         self._chunks = chunks or []
+        self.cookies = cookies or {}
 
     def json(self) -> dict[str, Any]:
         return self._payload
@@ -132,3 +134,47 @@ def test_pc_download_contract() -> None:
     assert "quark-cloud-drive/" in QUARK_UA
     assert "Electron/" in QUARK_UA
     assert "Channel/pckk_other_ch" in QUARK_UA
+
+
+def test_refresh_session_rotates_puus_without_dropping_login_cookie() -> None:
+    session = FakeSession()
+    session.responses = [
+        FakeResponse({"code": 0, "data": {}}, cookies={"__puus": "fresh", "__pus": "fresh-pus"})
+    ]
+    client = QuarkClient("auth=keep; __puus=stale; __pus=old-pus", session=session)  # type: ignore[arg-type]
+
+    client.refresh_session()
+
+    sent_cookie = session.get_calls[0]["headers"]["Cookie"]
+    assert "auth=keep" in sent_cookie
+    assert "__puus=" not in sent_cookie
+    assert "__pus=old-pus" in sent_cookie
+    assert "__puus=fresh" in client.cookie
+    assert "__pus=fresh-pus" in client.cookie
+
+
+def test_download_link_request_uses_rotated_cookie() -> None:
+    session = FakeSession()
+    session.responses = [
+        FakeResponse({"code": 0, "data": {}}, cookies={"__puus": "fresh"}),
+        FakeResponse(
+            {
+                "code": 0,
+                "data": [
+                    {
+                        "fid": "file-1",
+                        "file_name": "a.bin",
+                        "size": 5,
+                        "download_url": "https://download.example/a.bin",
+                    }
+                ],
+            }
+        ),
+    ]
+    client = QuarkClient("auth=keep; __puus=stale", session=session)  # type: ignore[arg-type]
+
+    items = client.get_download_items(["file-1"])
+
+    assert items[0]["fid"] == "file-1"
+    assert "__puus=fresh" in session.post_calls[0]["headers"]["Cookie"]
+    assert "__puus=stale" not in session.post_calls[0]["headers"]["Cookie"]
