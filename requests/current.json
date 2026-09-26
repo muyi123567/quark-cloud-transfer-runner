@@ -4,7 +4,7 @@
   "source_fid": "",
   "destination": "考研_AI_KB/01_SOURCE_INBOX/数学/澄潇宇数学大观",
   "dry_run": true,
-  "max_files": 100,
+  "max_files": 600,
   "chunk_mib": 16,
   "duplicate_policy": "skip"
 }
