@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from quark_cloud_transfer.models import QuarkItem
-from quark_cloud_transfer.quark import QuarkClient
+from quark_cloud_transfer.quark import QUARK_DOWNLOAD, QUARK_UA, QuarkClient
 
 
 class FakeResponse:
@@ -125,3 +125,10 @@ def test_probe_range_checks_content_range_total() -> None:
     client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
     assert client.probe_range("https://download.example/file", 123) is True
     assert client.probe_range("https://download.example/file", 999) is False
+
+
+def test_pc_download_contract() -> None:
+    assert QUARK_DOWNLOAD == "https://drive-pc.quark.cn/1/clouddrive/file/download"
+    assert "quark-cloud-drive/" in QUARK_UA
+    assert "Electron/" in QUARK_UA
+    assert "Channel/pckk_other_ch" in QUARK_UA
