@@ -42,8 +42,13 @@ class FakeQuark:
 class FakeDrive:
     def __init__(self) -> None:
         self.chunks: list[tuple[int, int, bytes]] = []
+        self.folder_calls: list[tuple[str, str]] = []
+        self.upload_parent_ids: list[str] = []
 
     def ensure_folder_path(self, destination: str, *, root_id: str) -> str:
+        self.folder_calls.append((destination, root_id))
+        if root_id == "parent":
+            return "sub-parent"
         return "parent"
 
     def choose_destination(
@@ -63,6 +68,7 @@ class FakeDrive:
         parent_id: str,
         mime_type: str,
     ) -> str:
+        self.upload_parent_ids.append(parent_id)
         return "https://upload.example/session"
 
     def put_chunk(
@@ -127,3 +133,40 @@ def test_dry_run_does_not_touch_drive() -> None:
     )
     assert results[0].status == "planned"
     assert events == ["plan"]
+
+
+class FakeFolderQuark(FakeQuark):
+    def resolve_path(self, source_path: str, *, root_fid: str = "0") -> QuarkItem:
+        return QuarkItem("dir-1", "folder", "/folder", 0, True)
+
+    def expand(
+        self,
+        item: QuarkItem,
+        *,
+        max_depth: int,
+        max_nodes: int,
+    ) -> list[QuarkItem]:
+        return [QuarkItem("fid-1", "a.bin", "/folder/sub/a.bin", 5, False)]
+
+
+def test_source_folder_hierarchy_is_preserved() -> None:
+    quark = FakeFolderQuark()
+    drive = FakeDrive()
+    service = TransferService(
+        quark,  # type: ignore[arg-type]
+        drive,  # type: ignore[arg-type]
+        chunk_size=2,
+        max_files=10,
+        max_depth=3,
+        max_nodes=100,
+        duplicate_policy="skip",
+        emit=lambda event, **payload: None,
+    )
+    results = service.run(
+        source_path="/root/folder",
+        destination="inbox",
+        dry_run=False,
+    )
+    assert results[0].status == "ok"
+    assert drive.folder_calls == [("inbox", "root"), ("sub", "parent")]
+    assert drive.upload_parent_ids == ["sub-parent"]
