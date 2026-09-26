@@ -1,11 +1,10 @@
 {
   "query": "",
-  "source_path": "/来自：分享/澄潇宇数学大观/0.【⚠️⚠️⚠️最重要】大观严选题/数二专属严选题/数二严选专属打印.png",
+  "source_path": "/来自：分享/澄潇宇数学大观",
   "source_fid": "",
-  "destination": "考研_AI_KB/01_SOURCE_INBOX/数学/澄潇宇数学大观/0.【⚠️⚠️⚠️最重要】大观严选题/数二专属严选题",
+  "destination": "考研_AI_KB/01_SOURCE_INBOX/数学/澄潇宇数学大观",
   "dry_run": false,
-  "max_files": 1,
+  "max_files": 600,
   "chunk_mib": 16,
-  "duplicate_policy": "skip",
-  "test_nonce": "cookie-rotation-v2"
+  "duplicate_policy": "skip"
 }
