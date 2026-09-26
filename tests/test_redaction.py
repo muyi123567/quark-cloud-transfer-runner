@@ -14,3 +14,15 @@ def test_redacts_refresh_token_json_fragment() -> None:
     redacted = redact_text(text)
     assert "1//secret" not in redacted
     assert '"secret"' not in redacted
+
+
+def test_redacts_quark_signed_download_url() -> None:
+    text = (
+        "412 for url: https://dl-pc-zb.drive.quark.cn/path/file"
+        "?auth_key=secret-auth&token=secret-token&ork=secret-ork&filename=a.pdf"
+    )
+    redacted = redact_text(text)
+    assert "secret-auth" not in redacted
+    assert "secret-token" not in redacted
+    assert "secret-ork" not in redacted
+    assert "<redacted>" in redacted
