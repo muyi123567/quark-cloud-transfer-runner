@@ -150,8 +150,8 @@ jobs:
               max_files_int = int(max_files)
           except ValueError:
               raise SystemExit("max_files must be an integer.")
-          if not 1 <= max_files_int <= 100:
-              raise SystemExit("max_files must be between 1 and 100.")
+          if not 1 <= max_files_int <= 1000:
+              raise SystemExit("max_files must be between 1 and 1000.")
 
           try:
               chunk_mib_float = float(chunk_mib)
