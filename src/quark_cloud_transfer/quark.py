@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
-from .errors import QuarkError
+from .errors import QuarkCdnError, QuarkError
 from .models import QuarkItem
 
 QUARK_BASE = "https://drive-pc.quark.cn/1/clouddrive"
@@ -20,6 +20,16 @@ QUARK_UA = (
 )
 _COOKIE_REFRESH_KEYS = ("__puus", "__pus")
 _DOWNLOAD_REFRESH_SECONDS = 15 * 60
+
+# The Quark download CDN is a mainland node pool that the GitHub runner reaches
+# over a cross-border path. A long connect timeout only wastes the run window,
+# so connect failures are detected quickly and turned into a fresh-URL retry.
+CDN_CONNECT_TIMEOUT_SECONDS = 20.0
+CDN_READ_TIMEOUT_SECONDS = 120.0
+
+# Signed-URL responses that mean "this URL is no longer usable": request a new
+# one instead of hammering the same host.
+_SIGNED_URL_REJECTED_STATUSES = (401, 403, 412)
 
 
 def _join_path(base: str, name: str) -> str:
@@ -55,8 +65,14 @@ class QuarkClient:
         *,
         session: Optional[requests.Session] = None,
         timeout: int = 45,
+        cdn_connect_timeout: float = CDN_CONNECT_TIMEOUT_SECONDS,
+        cdn_read_timeout: float = CDN_READ_TIMEOUT_SECONDS,
     ) -> None:
+        if cdn_connect_timeout <= 0 or cdn_read_timeout <= 0:
+            raise QuarkError("CDN timeouts must be positive")
         self.timeout = timeout
+        self.cdn_connect_timeout = cdn_connect_timeout
+        self.cdn_read_timeout = cdn_read_timeout
         self.session = session or requests.Session()
         self.session.trust_env = False
         self._cookies = _parse_cookie(cookie)
@@ -70,6 +86,11 @@ class QuarkClient:
                 "Accept": "application/json, text/plain, */*",
             }
         )
+
+    def _cdn_timeout(self) -> tuple[float, float]:
+        """(connect, read) timeout pair for Quark CDN requests."""
+
+        return (self.cdn_connect_timeout, self.cdn_read_timeout)
 
     def _cookie_header(self, *, omit: set[str] | None = None) -> dict[str, str]:
         return {"Cookie": _format_cookie(self._cookies, omit=omit)}
@@ -283,16 +304,26 @@ class QuarkClient:
         return list(items)
 
     def probe_range(self, url: str, expected_size: int) -> bool:
+        """Report whether this signed URL honors bounded Range requests.
+
+        ``False`` means the URL is reachable but not range-capable, so the
+        caller must use one continuous response. ``QuarkCdnError`` means the CDN
+        could not be reached or the signature expired, so the caller should
+        request a fresh download URL for the same FID and retry.
+        """
         try:
             with self.session.get(
                 url,
                 headers={**self._cookie_header(), "Range": "bytes=0-0"},
                 stream=True,
-                timeout=self.timeout,
+                timeout=self._cdn_timeout(),
             ) as response:
                 self._merge_cookie_updates(response)
-                if response.status_code == 412:
-                    raise QuarkError("Quark CDN probe failed with HTTP 412")
+                if response.status_code in _SIGNED_URL_REJECTED_STATUSES:
+                    raise QuarkCdnError(
+                        "Quark CDN rejected the signed download URL with "
+                        f"HTTP {response.status_code}"
+                    )
                 if response.status_code != 206:
                     return False
                 content_range = response.headers.get("Content-Range") or ""
@@ -303,42 +334,66 @@ class QuarkClient:
                     return False
                 next(response.iter_content(1), b"")
                 return True
-        except QuarkError:
+        except QuarkCdnError:
             raise
-        except requests.RequestException:
-            return False
+        except requests.RequestException as exc:
+            raise QuarkCdnError(f"Quark CDN range probe failed: {exc}") from exc
 
     def fetch_range(self, url: str, start: int, end: int) -> bytes:
-        with self.session.get(
-            url,
-            headers={**self._cookie_header(), "Range": f"bytes={start}-{end}"},
-            stream=True,
-            timeout=max(self.timeout, 120),
-        ) as response:
-            self._merge_cookie_updates(response)
-            if response.status_code != 206:
-                raise QuarkError(
-                    f"Quark did not honor Range {start}-{end}; HTTP {response.status_code}"
-                )
-            data = bytearray()
-            for chunk in response.iter_content(1024 * 1024):
-                if chunk:
-                    data.extend(chunk)
+        try:
+            with self.session.get(
+                url,
+                headers={**self._cookie_header(), "Range": f"bytes={start}-{end}"},
+                stream=True,
+                timeout=self._cdn_timeout(),
+            ) as response:
+                self._merge_cookie_updates(response)
+                if response.status_code in _SIGNED_URL_REJECTED_STATUSES:
+                    raise QuarkCdnError(
+                        "Quark CDN rejected the signed download URL with "
+                        f"HTTP {response.status_code}"
+                    )
+                if response.status_code != 206:
+                    raise QuarkCdnError(
+                        f"Quark did not honor Range {start}-{end}; "
+                        f"HTTP {response.status_code}"
+                    )
+                data = bytearray()
+                for chunk in response.iter_content(1024 * 1024):
+                    if chunk:
+                        data.extend(chunk)
+        except QuarkCdnError:
+            raise
+        except requests.RequestException as exc:
+            raise QuarkCdnError(
+                f"Quark Range {start}-{end} fetch failed: {exc}"
+            ) from exc
         expected = end - start + 1
         if len(data) != expected:
-            raise QuarkError(
+            raise QuarkCdnError(
                 f"Quark Range length mismatch: expected {expected}, got {len(data)}"
             )
         return bytes(data)
 
     def open_stream(self, url: str) -> requests.Response:
-        response = self.session.get(
-            url,
-            headers=self._cookie_header(),
-            stream=True,
-            timeout=max(self.timeout, 120),
-        )
+        try:
+            response = self.session.get(
+                url,
+                headers=self._cookie_header(),
+                stream=True,
+                timeout=self._cdn_timeout(),
+            )
+        except requests.RequestException as exc:
+            raise QuarkCdnError(
+                f"Quark CDN stream connection failed: {exc}"
+            ) from exc
         self._merge_cookie_updates(response)
+        if response.status_code in _SIGNED_URL_REJECTED_STATUSES:
+            status = response.status_code
+            response.close()
+            raise QuarkCdnError(
+                f"Quark CDN rejected the signed download URL with HTTP {status}"
+            )
         if response.status_code >= 400:
             status = response.status_code
             response.close()

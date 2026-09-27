@@ -26,3 +26,16 @@ def test_redacts_quark_signed_download_url() -> None:
     assert "secret-token" not in redacted
     assert "secret-ork" not in redacted
     assert "<redacted>" in redacted
+
+
+def test_redacts_bare_signed_download_path_from_requests_errors() -> None:
+    text = (
+        "HTTPSConnectionPool(host='dl-pc-zb.drive.quark.cn', port=443): Max retries "
+        "exceeded with url: /8JImeSAf/5439150331/530557ed90104ff7b21dfd84723d25ae6"
+        "a351a9a/6a351a9ab252731a2b8740828fe0477e6a992577?abt=8_0_&auth_key=secret"
+        "&sp=100&token=secret&ork=secret&filename=a.pdf (Caused by ConnectTimeoutError)"
+    )
+    redacted = redact_text(text)
+    assert "8JImeSAf" not in redacted
+    assert "auth_key=secret" not in redacted
+    assert "ConnectTimeoutError" in redacted

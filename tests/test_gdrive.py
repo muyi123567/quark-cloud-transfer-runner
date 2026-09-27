@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from quark_cloud_transfer.errors import DriveError
 from quark_cloud_transfer.gdrive import GoogleDriveClient
 
 
@@ -94,3 +97,50 @@ def test_put_chunk_sends_resumable_content_range() -> None:
     )
     assert response.status_code == 308
     assert session.put_calls[0]["headers"]["Content-Range"] == "bytes 0-3/4"
+
+
+def test_uploaded_bytes_reads_the_committed_offset() -> None:
+    session = FakeSession()
+    session.put_response = FakeResponse(
+        status_code=308,
+        headers={"Range": "bytes=0-2047"},
+    )
+    client = make_client(session)
+    client._access_token = "access"
+    client._expires_at = 10**12
+
+    assert client.uploaded_bytes("https://upload.example/session", 4096) == 2048
+    assert (
+        session.put_calls[0]["headers"]["Content-Range"] == "bytes */4096"
+    )
+
+
+def test_uploaded_bytes_treats_a_fresh_session_as_empty() -> None:
+    session = FakeSession()
+    session.put_response = FakeResponse(status_code=308)
+    client = make_client(session)
+    client._access_token = "access"
+    client._expires_at = 10**12
+
+    assert client.uploaded_bytes("https://upload.example/session", 4096) == 0
+
+
+def test_uploaded_bytes_reports_a_completed_session() -> None:
+    session = FakeSession()
+    session.put_response = FakeResponse(status_code=200, payload={"id": "drive-1"})
+    client = make_client(session)
+    client._access_token = "access"
+    client._expires_at = 10**12
+
+    assert client.uploaded_bytes("https://upload.example/session", 4096) == 4096
+
+
+def test_uploaded_bytes_raises_when_the_session_is_gone() -> None:
+    session = FakeSession()
+    session.put_response = FakeResponse(status_code=404)
+    client = make_client(session)
+    client._access_token = "access"
+    client._expires_at = 10**12
+
+    with pytest.raises(DriveError, match="session is gone"):
+        client.uploaded_bytes("https://upload.example/session", 4096)

@@ -246,6 +246,53 @@ class GoogleDriveClient:
             time.sleep(min(2**attempt, 30))
         raise DriveError(f"Drive chunk upload failed after {max_retries} retries")
 
+    def uploaded_bytes(
+        self,
+        session_url: str,
+        total: int,
+        *,
+        max_retries: int = 4,
+    ) -> int:
+        """Return how many bytes Drive has committed for a resumable session.
+
+        Uses the standard empty status probe (``Content-Range: bytes */total``)
+        so an interrupted transfer can resume instead of restarting. Raises
+        ``DriveError`` when the committed offset cannot be determined, which
+        tells the caller to discard the session and start a fresh one.
+        """
+        for attempt in range(max_retries):
+            response = self.session.put(
+                session_url,
+                headers={
+                    "Authorization": f"Bearer {self._token()}",
+                    "Content-Length": "0",
+                    "Content-Range": f"bytes */{total}",
+                },
+                data=b"",
+                timeout=max(self.timeout, 60),
+            )
+            if response.status_code in (200, 201):
+                return total
+            if response.status_code == 308:
+                header = (response.headers.get("Range") or "").strip()
+                match = re.fullmatch(r"bytes=0-(\d+)", header)
+                if match:
+                    return int(match.group(1)) + 1
+                return 0
+            if response.status_code == 401:
+                self._token(force=True)
+            elif response.status_code in (404, 410):
+                raise DriveError("Drive resumable upload session is gone")
+            elif response.status_code not in (408, 429) and not (
+                500 <= response.status_code < 600
+            ):
+                raise DriveError(
+                    "Drive resumable upload status probe failed with "
+                    f"HTTP {response.status_code}"
+                )
+            time.sleep(min(2**attempt, 30))
+        raise DriveError("Drive resumable upload status probe failed after retries")
+
     def download_to_path(
         self,
         file_id: str,

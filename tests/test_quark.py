@@ -2,8 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+import requests
+
+from quark_cloud_transfer.errors import QuarkCdnError
 from quark_cloud_transfer.models import QuarkItem
-from quark_cloud_transfer.quark import QUARK_DOWNLOAD, QUARK_UA, QuarkClient
+from quark_cloud_transfer.quark import (
+    CDN_CONNECT_TIMEOUT_SECONDS,
+    CDN_READ_TIMEOUT_SECONDS,
+    QUARK_DOWNLOAD,
+    QUARK_UA,
+    QuarkClient,
+)
 
 
 class FakeResponse:
@@ -32,6 +42,9 @@ class FakeResponse:
     def iter_content(self, size: int):
         yield from self._chunks
 
+    def close(self) -> None:
+        return None
+
     def __enter__(self) -> "FakeResponse":
         return self
 
@@ -44,15 +57,21 @@ class FakeSession:
         self.headers: dict[str, str] = {}
         self.get_calls: list[dict[str, Any]] = []
         self.post_calls: list[dict[str, Any]] = []
-        self.responses: list[FakeResponse] = []
+        self.responses: list[Any] = []
 
     def get(self, url: str, **kwargs: Any) -> FakeResponse:
         self.get_calls.append({"url": url, **kwargs})
-        return self.responses.pop(0)
+        return self._next()
 
     def post(self, url: str, **kwargs: Any) -> FakeResponse:
         self.post_calls.append({"url": url, **kwargs})
-        return self.responses.pop(0)
+        return self._next()
+
+    def _next(self) -> FakeResponse:
+        item = self.responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
 
 def test_resolve_path_uses_exact_segment_names() -> None:
@@ -178,3 +197,106 @@ def test_download_link_request_uses_rotated_cookie() -> None:
     assert items[0]["fid"] == "file-1"
     assert "__puus=fresh" in session.post_calls[0]["headers"]["Cookie"]
     assert "__puus=stale" not in session.post_calls[0]["headers"]["Cookie"]
+
+
+def test_cdn_requests_use_short_connect_and_long_read_timeout() -> None:
+    session = FakeSession()
+    session.responses = [
+        FakeResponse(
+            status_code=206,
+            headers={"Content-Range": "bytes 0-0/123"},
+            chunks=[b"x"],
+        )
+    ]
+    client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
+
+    assert client.probe_range("https://dl-pc-zb.drive.quark.cn/x", 123) is True
+
+    # A short connect timeout lets a bad CDN node fail over quickly instead of
+    # burning two minutes of the run window per attempt.
+    assert session.get_calls[0]["timeout"] == (
+        CDN_CONNECT_TIMEOUT_SECONDS,
+        CDN_READ_TIMEOUT_SECONDS,
+    )
+    assert CDN_CONNECT_TIMEOUT_SECONDS < CDN_READ_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.exceptions.ConnectTimeout("connection to CDN timed out"),
+        requests.exceptions.ReadTimeout("read from CDN timed out"),
+        requests.exceptions.ConnectionError("connection reset by peer"),
+    ],
+)
+def test_probe_range_surfaces_transport_failures_as_cdn_errors(error: Exception) -> None:
+    session = FakeSession()
+    session.responses = [error]
+    client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(QuarkCdnError, match="range probe failed"):
+        client.probe_range("https://dl-pc-zb.drive.quark.cn/x", 10)
+
+
+def test_probe_range_flags_an_expired_signed_url() -> None:
+    session = FakeSession()
+    session.responses = [FakeResponse(status_code=412)]
+    client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(QuarkCdnError, match="HTTP 412"):
+        client.probe_range("https://dl-pc-zb.drive.quark.cn/x", 10)
+
+
+def test_fetch_range_surfaces_transport_failures_as_cdn_errors() -> None:
+    session = FakeSession()
+    session.responses = [requests.exceptions.ReadTimeout("read timed out")]
+    client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(QuarkCdnError, match="Range 0-9 fetch failed"):
+        client.fetch_range("https://dl-pc-zb.drive.quark.cn/x", 0, 9)
+
+
+def test_fetch_range_flags_a_short_body() -> None:
+    session = FakeSession()
+    session.responses = [
+        FakeResponse(status_code=206, chunks=[b"ab"]),
+    ]
+    client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(QuarkCdnError, match="length mismatch"):
+        client.fetch_range("https://dl-pc-zb.drive.quark.cn/x", 0, 9)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.exceptions.ConnectTimeout("connection to CDN timed out"),
+        requests.exceptions.ConnectionError("connection reset by peer"),
+    ],
+)
+def test_open_stream_surfaces_transport_failures_as_cdn_errors(error: Exception) -> None:
+    session = FakeSession()
+    session.responses = [error]
+    client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(QuarkCdnError, match="stream connection failed"):
+        client.open_stream("https://dl-pc-zb.drive.quark.cn/x")
+
+
+def test_open_stream_flags_an_expired_signed_url() -> None:
+    session = FakeSession()
+    session.responses = [FakeResponse(status_code=412)]
+    client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(QuarkCdnError, match="HTTP 412"):
+        client.open_stream("https://dl-pc-zb.drive.quark.cn/x")
+
+
+def test_open_stream_returns_a_live_response() -> None:
+    session = FakeSession()
+    session.responses = [FakeResponse(status_code=200, chunks=[b"data"])]
+    client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
+
+    response = client.open_stream("https://dl-pc-zb.drive.quark.cn/x")
+
+    assert response.status_code == 200

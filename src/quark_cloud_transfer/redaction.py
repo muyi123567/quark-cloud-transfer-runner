@@ -16,6 +16,9 @@ _PATTERNS = [
         r"(?i)(https://[^/\s]+\.drive\.quark\.cn/[^?\s\"']+)\?[^\s\"']+"
     ),
     re.compile(r"(?i)([?&](?:auth_key|token|ork)=)[^&\s\"']+"),
+    # The bare signed-download path that requests embeds in exception text,
+    # e.g. "url: /8JImeSAf/5439150331/530557ed.../...?abt=8_0_&auth_key=...".
+    re.compile(r"(?i)(url:\s*)(/[^\s?]*\?[^\s\"']*)"),
 ]
 
 

@@ -22,3 +22,4 @@ class TransferResult:
     source_path: str
     drive_id: Optional[str] = None
     drive_name: Optional[str] = None
+    error: Optional[str] = None
