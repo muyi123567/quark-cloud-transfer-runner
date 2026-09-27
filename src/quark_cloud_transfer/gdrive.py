@@ -198,6 +198,15 @@ class GoogleDriveClient:
             raise DriveError("Google Drive folder creation returned no id")
         return str(folder_id)
 
+    def resolve_folder_path(self, path: str, *, root_id: str = "root") -> str:
+        current = root_id
+        for part in [item for item in re.split(r"[\\/]+", path.strip("/\\")) if item]:
+            found = self.list_named(current, part, FOLDER_MIME)
+            if not found:
+                raise DriveError(f"Google Drive folder path not found: {path}")
+            current = str(found[0]["id"])
+        return current
+
     def ensure_folder_path(self, path: str, *, root_id: str = "root") -> str:
         current = root_id
         for part in [item for item in re.split(r"[\\/]+", path.strip("/\\")) if item]:
