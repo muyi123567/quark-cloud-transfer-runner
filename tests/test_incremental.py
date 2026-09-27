@@ -118,3 +118,38 @@ def test_retransfer_branch_can_match_drive_baseline_without_source_sibling() -> 
     )
     assert aliases == {"1(1).高数": "1.高数"}
     assert {item.status for item in plan} == {"unchanged"}
+
+
+def test_generic_suffix_folder_matches_drive_baseline() -> None:
+    items = [
+        q("a", "/澄潇宇数学大观/老版文件（不推荐）(1)/x/a.pdf", 10, 2),
+        q("b", "/澄潇宇数学大观/老版文件（不推荐）(1)/x/b.pdf", 20, 2),
+    ]
+    drive = [
+        DriveInventoryItem("老版文件（不推荐）/x/a.pdf", "a", 10),
+        DriveInventoryItem("老版文件（不推荐）/x/b.pdf", "b", 20),
+    ]
+    plan, aliases = build_incremental_plan(
+        items,
+        source_path="/澄潇宇数学大观",
+        drive_items=drive,
+    )
+    assert aliases == {"老版文件（不推荐）(1)": "老版文件（不推荐）"}
+    assert {item.status for item in plan} == {"unchanged"}
+
+
+def test_duplicate_root_file_is_collapsed_by_same_size() -> None:
+    items = [
+        q("dup", "/澄潇宇数学大观/大观题库打印二维码(1).png", 85868, 2),
+    ]
+    drive = [
+        DriveInventoryItem("大观题库打印二维码.png", "orig", 85868),
+    ]
+    plan, _ = build_incremental_plan(
+        items,
+        source_path="/澄潇宇数学大观",
+        drive_items=drive,
+    )
+    assert [(item.logical_path, item.status) for item in plan] == [
+        ("大观题库打印二维码.png", "unchanged")
+    ]
