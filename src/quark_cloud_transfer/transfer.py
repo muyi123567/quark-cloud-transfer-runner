@@ -478,7 +478,13 @@ class TransferService:
         )
         return created
 
-    def _transfer_one(self, item: QuarkItem, parent_id: str) -> TransferResult:
+    def _transfer_one(
+        self,
+        item: QuarkItem,
+        parent_id: str,
+        *,
+        existing_drive_id: Optional[str] = None,
+    ) -> TransferResult:
         """Transfer one file, retrying the Quark CDN leg with a fresh URL.
 
         Every attempt re-requests a download URL for the same FID and resumes
@@ -514,7 +520,13 @@ class TransferService:
                 )
                 self._sleep(delay)
             try:
-                return self._attempt_file(item, parent_id, state, attempt)
+                return self._attempt_file(
+                    item,
+                    parent_id,
+                    state,
+                    attempt,
+                    existing_drive_id=existing_drive_id,
+                )
             except _RETRYABLE_FILE_ERRORS as exc:
                 last_error = redact_text(exc)
                 last_exception = exc
@@ -547,6 +559,8 @@ class TransferService:
         parent_id: str,
         state: _UploadState,
         attempt: int,
+        *,
+        existing_drive_id: Optional[str] = None,
     ) -> TransferResult:
         """One attempt: fresh download URL, then a resumable Drive upload."""
 
@@ -574,34 +588,48 @@ class TransferService:
             state.session_url = None
             state.session_size = None
             state.uploaded = 0
-            chosen, existing = self.drive.choose_destination(
-                parent_id,
-                name,
-                size,
-                on_exists=self.duplicate_policy,
-            )
-            if chosen is None:
+            if existing_drive_id:
+                mime_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+                state.session_url = self.drive.initiate_update(
+                    existing_drive_id,
+                    size,
+                    mime_type,
+                )
                 self.emit(
-                    "skipped_existing",
+                    "updating_existing",
                     name=name,
                     size=size,
-                    drive_id=existing.get("id") if existing else None,
+                    drive_id=existing_drive_id,
                 )
-                return TransferResult(
-                    status="skipped",
-                    name=name,
-                    source_size=size,
-                    source_path=item.path,
-                    drive_id=existing.get("id") if existing else None,
-                    drive_name=name,
+            else:
+                chosen, existing = self.drive.choose_destination(
+                    parent_id,
+                    name,
+                    size,
+                    on_exists=self.duplicate_policy,
                 )
-            mime_type = mimetypes.guess_type(chosen)[0] or "application/octet-stream"
-            state.session_url = self.drive.initiate_upload(
-                chosen,
-                size,
-                parent_id,
-                mime_type,
-            )
+                if chosen is None:
+                    self.emit(
+                        "skipped_existing",
+                        name=name,
+                        size=size,
+                        drive_id=existing.get("id") if existing else None,
+                    )
+                    return TransferResult(
+                        status="skipped",
+                        name=name,
+                        source_size=size,
+                        source_path=item.path,
+                        drive_id=existing.get("id") if existing else None,
+                        drive_name=name,
+                    )
+                mime_type = mimetypes.guess_type(chosen)[0] or "application/octet-stream"
+                state.session_url = self.drive.initiate_upload(
+                    chosen,
+                    size,
+                    parent_id,
+                    mime_type,
+                )
             state.session_size = size
 
         supports_range = self.quark.probe_range(url, size)
