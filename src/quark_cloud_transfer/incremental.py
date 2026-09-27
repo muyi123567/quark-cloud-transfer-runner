@@ -10,6 +10,7 @@ from .transfer import TransferService
 
 
 _RETRANSFER_TOP_RE = re.compile(r"^(\d+)\((\d+)\)(.*)$")
+_RETRANSFER_SUFFIX_RE = re.compile(r"^(.*)\((\d+)\)$")
 
 
 @dataclass(frozen=True)
@@ -48,9 +49,20 @@ def _rest_after_top(path: str) -> str:
 
 def _candidate_canonical_top(name: str) -> Optional[str]:
     match = _RETRANSFER_TOP_RE.match(name)
-    if not match:
+    if match:
+        return f"{match.group(1)}{match.group(3)}"
+    suffix = _RETRANSFER_SUFFIX_RE.match(name)
+    if suffix and suffix.group(1):
+        return suffix.group(1)
+    return None
+
+
+def _candidate_canonical_root_file(name: str) -> Optional[str]:
+    path = PurePosixPath(name)
+    match = _RETRANSFER_SUFFIX_RE.match(path.stem)
+    if not match or not match.group(1):
         return None
-    return f"{match.group(1)}{match.group(3)}"
+    return f"{match.group(1)}{path.suffix}"
 
 
 def _branch_signature(entries: Iterable[tuple[str, QuarkItem]], top: str) -> set[tuple[str, int]]:
@@ -107,6 +119,7 @@ def normalize_retransfer_branches(
         if overlap >= required and ratio >= min_overlap_ratio:
             aliases[top] = canonical
 
+    drive_by_path = {item.path: item for item in drive_rows}
     logical: dict[str, list[QuarkItem]] = {}
     for rel, item in rel_items:
         if not rel:
@@ -115,6 +128,19 @@ def normalize_retransfer_branches(
         mapped_top = aliases.get(top, top)
         rest = _rest_after_top(rel)
         mapped = mapped_top if not rest else f"{mapped_top}/{rest}"
+
+        # Quark also suffixes duplicate root files as name(1).ext.  Collapse
+        # only when the unsuffixed Drive file exists with the same byte size.
+        if not rest and mapped == rel:
+            canonical_file = _candidate_canonical_root_file(rel)
+            existing = drive_by_path.get(canonical_file or "")
+            if (
+                canonical_file
+                and existing is not None
+                and int(existing.size) == int(item.size)
+            ):
+                mapped = canonical_file
+
         logical.setdefault(mapped, []).append(item)
 
     return logical, aliases
