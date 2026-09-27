@@ -39,6 +39,12 @@ Use the public runner repository to start transfers.
 - Google Drive OAuth refresh-token injection through GitHub Actions secrets.
 - Quark recursive enumeration and exact path or Web FID resolution.
 - Quark Range capability probe with a continuous-stream fallback.
+- Per-file Quark CDN retry with exponential backoff and a freshly requested
+  download URL on every attempt.
+- Resumable-upload resume after a failed CDN attempt, for both the Range and
+  the continuous-stream path.
+- Batch isolation: one bad file is recorded and the remaining files continue.
+- Failure sweeps plus a machine-readable run summary.
 - Google Drive resumable upload in bounded in-memory chunks.
 - Same-name and same-size duplicate skip.
 - Final Google Drive byte-size verification.
@@ -183,6 +189,20 @@ prints the planned files; it does not call Google Drive.
 
 For the real transfer, set `dry_run=false`.
 
+### Workflow resilience inputs
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `file_retries` | `6` | Quark CDN attempts per file; each attempt gets a fresh download URL. |
+| `retry_rounds` | `2` | Extra sweeps over the failed set after the first pass. |
+| `max_runtime_minutes` | `300` | Soft budget; stop starting new files this many minutes in. |
+
+The job runs the unit tests before the transfer, uses `timeout-minutes: 355` so
+the final sweep and summary still fit inside the GitHub Actions 6-hour limit,
+keeps a single non-cancelling concurrency group, tees the JSON event stream to
+`transfer.log`, and always publishes a job summary with the counts plus the
+failed and deferred file lists.
+
 ## Runtime behavior
 
 ### Quark side
@@ -193,6 +213,35 @@ then either:
 
 - fetches bounded Range chunks; or
 - reads one continuous Quark response and buffers at most one upload chunk.
+
+The download CDN (`dl-pc-zb.drive.quark.cn`) is a mainland node pool reached
+from an overseas GitHub runner, so connect and read failures are expected
+rather than exceptional. Every file therefore gets up to `--file-attempts`
+attempts (default 6) with exponential backoff (5, 15, 30, 60, 120 seconds). Each
+attempt requests a **new** signed download URL for the same FID, so a node that
+refuses connections is simply left behind. Connect timeouts are short (20 s) so
+a dead node fails over quickly instead of consuming two minutes per attempt.
+
+### Resume and failure handling
+
+- A failed attempt does not lose uploaded bytes: the Drive resumable session is
+  reused, its committed offset is read with an empty `Content-Range: bytes */N`
+  status probe, and the transfer continues from there. The continuous-stream
+  path skips the already-committed prefix of the new response.
+- A file that still fails is recorded as `failed` and the sweep continues with
+  the remaining files. One bad file never aborts the batch.
+- After the first sweep, the failed set is retried for `--retry-rounds` extra
+  rounds (default 2, 60 s apart).
+- `--max-runtime-seconds` is a soft budget: once it is used up, no new file is
+  started and the rest are reported as `deferred`. This keeps a long run inside
+  the GitHub Actions 6-hour limit and still produces a summary.
+- `--file-attempts` bounds the work spent on one file, so a systemic outage
+  cannot consume the whole window.
+
+The CLI finishes with a `summary` event containing the planned/uploaded/skipped/
+failed/deferred counts, the failure list, and the elapsed time. Exit codes are
+`0` (everything landed or was already present), `2` (the run itself failed) and
+`3` (the sweep completed but files are still outstanding).
 
 ### Drive side
 

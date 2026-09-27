@@ -55,6 +55,13 @@ scripts were used instead.
   size fails unless `duplicate_policy=rename`.
 - Range boundary: Range support uses bounded per-chunk Quark requests; no Range
   support uses one continuous response and bounded memory.
+- CDN boundary: a Quark CDN connect/read failure, a truncated continuous
+  response, or an expired signed URL retries the same file with a freshly
+  requested download URL and exponential backoff before the file is failed.
+- Batch boundary: a single failed file is recorded and the sweep continues; the
+  failed set is revisited in later rounds and reported in the run summary.
+- Resume boundary: an interrupted upload continues from the Drive session's
+  committed offset instead of restarting the file.
 - Integrity boundary: a final Drive size mismatch fails the run.
 - Safety boundary: more matches than `max_files` fail before any transfer.
 
@@ -121,3 +128,43 @@ Status: `END_TO_END_VERIFIED`.
 
 Do not describe the end-to-end path as fully verified until this smoke test
 passes.
+
+## 2026-09-27 CDN resilience hardening
+
+Observed failure: run `36262255348` transferred the 澄潇宇数学大观 package until
+`【高数合集】大观知识点.pdf` (24,242,097 bytes, `range_supported: false`) and then
+died on the first continuous-stream request:
+
+```text
+ConnectTimeoutError(HTTPSConnection(host='dl-pc-zb.drive.quark.cn', port=443),
+  'Connection to dl-pc-zb.drive.quark.cn timed out. (connect timeout=120)')
+```
+
+Quark metadata, listing, and download-URL generation had all succeeded, so the
+defect was not authentication or the Drive side: the migration program had no
+file-level tolerance for an unstable mainland CDN reached from an overseas
+runner, and one flaky connect aborted the whole 488-file batch.
+
+Changes:
+
+- `QuarkClient` now raises `QuarkCdnError` for connect/read failures, truncated
+  streams, and expired signed URLs, and uses a `(20 s connect, 120 s read)`
+  timeout pair so a dead node fails over quickly.
+- `TransferService` retries each file up to `file_attempts` times with
+  5/15/30/60/120 s backoff, requesting a new download URL for the same FID on
+  every attempt.
+- A failed attempt resumes the Drive resumable session at its committed offset,
+  including the continuous-stream path, which skips the committed prefix.
+- A file that still fails is recorded and the sweep continues; the failed set is
+  retried for `retry_rounds` extra rounds, and a `summary` event reports the
+  outcome.
+- `--max-runtime-seconds` defers the remaining files once the soft budget is
+  spent, so the run always ends with a summary inside the Actions time limit.
+- The workflow adds `timeout-minutes: 355`, a pre-transfer unit-test step, a
+  `transfer.log` tee, and an always-on job summary listing failures.
+
+Coverage added in `tests/test_retry.py` (plus extensions in `tests/test_quark.py`
+and `tests/test_gdrive.py`): retry/backoff with fresh URLs, stream resume from a
+committed offset, single-file failure isolation, failure sweeps, same-name and
+same-size skip semantics during a retry, runtime-budget deferral, CLI exit codes,
+and the Drive session status probe.
