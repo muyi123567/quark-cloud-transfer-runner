@@ -251,17 +251,81 @@ class QuarkClient:
         max_nodes: int = 100_000,
         files_only: bool = True,
     ) -> List[QuarkItem]:
+        """Search the whole Quark drive through the native search endpoint.
+
+        Quark's web UI exposes virtual groupings that are not always reachable
+        by walking pdir_fid=0. The native /file/search endpoint sees those files
+        and is also much faster than recursively listing the whole drive.
+        parent_fid/max_depth are retained for call compatibility; global search
+        is intentionally drive-wide.
+        """
+        del parent_fid, max_depth
         needle = keyword.casefold()
         hits: list[QuarkItem] = []
-        for item in self.walk(
-            parent_fid,
-            max_depth=max_depth,
-            max_nodes=max_nodes,
-        ):
-            if files_only and item.is_dir:
-                continue
-            if needle in item.name.casefold():
-                hits.append(item)
+        seen: set[str] = set()
+        page = 1
+        page_size = 100
+        scanned = 0
+
+        while True:
+            query = dict(QUARK_COMMON_QUERY)
+            query.update(
+                {
+                    "q": keyword,
+                    "_page": str(page),
+                    "_size": str(page_size),
+                    "_fetch_total": "1",
+                    "_sort": "file_type:desc,updated_at:desc",
+                    "_is_hl": "1",
+                }
+            )
+            response = self.session.get(
+                QUARK_BASE + "/file/search",
+                params=query,
+                headers=self._cookie_header(),
+                timeout=self.timeout,
+            )
+            payload = self._response_json(response, "Quark search")
+            items = (payload.get("data") or {}).get("list") or []
+            if not items:
+                break
+
+            fresh = 0
+            for raw in items:
+                scanned += 1
+                if scanned > max_nodes:
+                    raise QuarkError(
+                        f"Quark search exceeded the safety limit of {max_nodes} nodes"
+                    )
+                fid = str(raw.get("fid") or "")
+                if not fid or fid in seen:
+                    continue
+                seen.add(fid)
+                fresh += 1
+                is_dir = str(raw.get("file_type")) == "0"
+                if files_only and is_dir:
+                    continue
+                name = str(raw.get("file_name") or raw.get("filename") or "")
+                if not name or needle not in name.casefold():
+                    continue
+                path = str(raw.get("file_path") or raw.get("path") or f"/{name}")
+                if not path.startswith("/"):
+                    path = "/" + path
+                hits.append(
+                    QuarkItem(
+                        fid=fid,
+                        name=name,
+                        path=path,
+                        size=int(raw.get("size") or 0),
+                        is_dir=is_dir,
+                        updated_at=raw.get("updated_at"),
+                    )
+                )
+
+            if len(items) < page_size or fresh == 0:
+                break
+            page += 1
+
         return hits
 
     def resolve_path(self, source_path: str, *, root_fid: str = "0") -> QuarkItem:
