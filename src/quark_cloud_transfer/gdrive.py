@@ -142,6 +142,47 @@ class GoogleDriveClient:
             raise _drive_error("Google Drive list", response)
         return list(response.json().get("files") or [])
 
+    def list_children(self, parent_id: str) -> List[Dict[str, Any]]:
+        files: list[dict[str, Any]] = []
+        page_token: Optional[str] = None
+        while True:
+            params: dict[str, Any] = {
+                "q": f"'{escape_q(parent_id)}' in parents and trashed = false",
+                "fields": "nextPageToken,files(id,name,size,mimeType,parents,md5Checksum)",
+                "pageSize": 1000,
+                "supportsAllDrives": "true",
+                "includeItemsFromAllDrives": "true",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            response = self._request("GET", DRIVE_API + "/files", params=params)
+            if not response.ok:
+                raise _drive_error("Google Drive child list", response)
+            payload = response.json()
+            files.extend(payload.get("files") or [])
+            page_token = payload.get("nextPageToken")
+            if not page_token:
+                break
+        return files
+
+    def walk_files(self, root_id: str) -> List[Dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        stack: list[tuple[str, str]] = [(root_id, "")]
+        while stack:
+            parent_id, base = stack.pop()
+            for item in self.list_children(parent_id):
+                name = str(item.get("name") or "")
+                if not name:
+                    continue
+                path = name if not base else f"{base}/{name}"
+                if item.get("mimeType") == FOLDER_MIME:
+                    stack.append((str(item["id"]), path))
+                    continue
+                row = dict(item)
+                row["path"] = path
+                out.append(row)
+        return out
+
     def create_folder(self, parent_id: str, name: str) -> str:
         response = self._request(
             "POST",
@@ -219,6 +260,32 @@ class GoogleDriveClient:
         location = response.headers.get("Location")
         if not response.ok or not location:
             raise _drive_error("Failed to initiate Drive resumable upload", response)
+        return location
+
+    def initiate_update(
+        self,
+        file_id: str,
+        size: int,
+        mime_type: str,
+    ) -> str:
+        response = self._request(
+            "PATCH",
+            DRIVE_UPLOAD + f"/files/{file_id}",
+            params={
+                "uploadType": "resumable",
+                "supportsAllDrives": "true",
+                "fields": "id,name,size,mimeType,parents,md5Checksum",
+            },
+            headers={
+                "Content-Type": "application/json; charset=UTF-8",
+                "X-Upload-Content-Type": mime_type,
+                "X-Upload-Content-Length": str(size),
+            },
+            json={"mimeType": mime_type},
+        )
+        location = response.headers.get("Location")
+        if not response.ok or not location:
+            raise _drive_error("Failed to initiate Drive resumable update", response)
         return location
 
     def put_chunk(
