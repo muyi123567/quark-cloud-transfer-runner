@@ -45,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--source-path", help="Exact Quark path to a file or folder.")
     selection.add_argument("--source-fid", help="Exact 32-character Quark Web FID.")
     parser.add_argument("--destination", required=True, help="Google Drive folder path.")
+    parser.add_argument(
+        "--mode",
+        choices=("full", "incremental"),
+        default="full",
+        help="full = normal transfer; incremental = metadata diff then NEW/MODIFIED only.",
+    )
     parser.add_argument("--drive-root-id", help="Override GDRIVE_ROOT_FOLDER_ID.")
     parser.add_argument("--quark-root-fid", default="0", help="Quark traversal root FID.")
     parser.add_argument("--dry-run", action="store_true")
@@ -122,8 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.mode == "incremental" and not args.source_path:
+            raise ValueError("incremental mode requires --source-path")
         settings = load_settings(
-            require_drive=not args.dry_run,
+            require_drive=(args.mode == "incremental" or not args.dry_run),
             chunk_mib=args.chunk_mib,
             max_files=args.max_files,
             max_depth=args.max_depth,
@@ -139,9 +147,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             proxy=quark_proxy,
         )
         drive = (
-            None
-            if args.dry_run
-            else GoogleDriveClient(settings.gdrive_oauth or {})
+            GoogleDriveClient(settings.gdrive_oauth or {})
+            if args.mode == "incremental" or not args.dry_run
+            else None
         )
         service = TransferService(
             quark,
@@ -161,6 +169,37 @@ def main(argv: Optional[list[str]] = None) -> int:
             prefetch=args.prefetch,
             prefetch_min_bytes=int(args.prefetch_min_mib * 1024 * 1024),
         )
+        if args.mode == "incremental":
+            from .incremental import IncrementalSyncService
+
+            incremental = IncrementalSyncService(service)
+            plan = incremental.run(
+                source_path=args.source_path or "",
+                destination=args.destination,
+                dry_run=args.dry_run,
+                root_fid=args.quark_root_fid,
+            )
+            unresolved = [
+                item
+                for item in plan
+                if item.status == "conflict"
+            ]
+            if not unresolved:
+                return 0
+            emit(
+                "incomplete",
+                conflicts=len(unresolved),
+                files=[
+                    {
+                        "path": item.logical_path,
+                        "status": item.status,
+                        "error": item.reason,
+                    }
+                    for item in unresolved
+                ],
+            )
+            return 3
+
         results = service.run(
             destination=args.destination,
             dry_run=args.dry_run,
