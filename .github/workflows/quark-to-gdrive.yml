@@ -19,6 +19,14 @@ on:
         description: Google Drive folder path below the configured root.
         required: true
         type: string
+      mode:
+        description: full transfer or metadata-first incremental sync.
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - incremental
       dry_run:
         description: Resolve and report the plan without writing to Drive.
         required: true
@@ -123,6 +131,7 @@ jobs:
           INPUT_SOURCE_PATH: ${{ inputs.source_path }}
           INPUT_SOURCE_FID: ${{ inputs.source_fid }}
           INPUT_DESTINATION: ${{ inputs.destination }}
+          INPUT_MODE: ${{ inputs.mode }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
           INPUT_MAX_FILES: ${{ inputs.max_files }}
           INPUT_CHUNK_MIB: ${{ inputs.chunk_mib }}
@@ -146,6 +155,7 @@ jobs:
                   "source_path": os.environ.get("INPUT_SOURCE_PATH", ""),
                   "source_fid": os.environ.get("INPUT_SOURCE_FID", ""),
                   "destination": os.environ.get("INPUT_DESTINATION", ""),
+                  "mode": os.environ.get("INPUT_MODE", "full"),
                   "dry_run": os.environ.get("INPUT_DRY_RUN", "true"),
                   "max_files": os.environ.get("INPUT_MAX_FILES", "10"),
                   "chunk_mib": os.environ.get("INPUT_CHUNK_MIB", "16"),
@@ -169,6 +179,7 @@ jobs:
           source_path = text_value("source_path")
           source_fid = text_value("source_fid")
           destination = text_value("destination")
+          mode = text_value("mode", "full").lower()
           dry_run = text_value("dry_run", "true").lower()
           max_files = text_value("max_files", "10")
           chunk_mib = text_value("chunk_mib", "16")
@@ -189,6 +200,10 @@ jobs:
               raise SystemExit("Exactly one of query, source_path, or source_fid must be provided.")
           if not destination:
               raise SystemExit("destination is required.")
+          if mode not in {"full", "incremental"}:
+              raise SystemExit("mode must be full or incremental.")
+          if mode == "incremental" and not source_path:
+              raise SystemExit("incremental mode requires source_path.")
           if dry_run not in {"true", "false"}:
               raise SystemExit("dry_run must be true or false.")
           if duplicate_policy not in {"skip", "rename"}:
@@ -249,6 +264,7 @@ jobs:
               "source_path": source_path,
               "source_fid": source_fid,
               "destination": destination,
+              "mode": mode,
               "dry_run": dry_run,
               "max_files": str(max_files_int),
               "chunk_mib": str(chunk_mib_float).rstrip("0").rstrip("."),
@@ -271,6 +287,7 @@ jobs:
               "event": os.environ["EVENT_NAME"],
               "selector": chosen[0],
               "destination": destination,
+              "mode": mode,
               "dry_run": dry_run == "true",
               "max_files": max_files_int,
               "chunk_mib": chunk_mib_float,
@@ -289,6 +306,7 @@ jobs:
           SOURCE_PATH: ${{ steps.request.outputs.source_path }}
           SOURCE_FID: ${{ steps.request.outputs.source_fid }}
           DESTINATION: ${{ steps.request.outputs.destination }}
+          MODE: ${{ steps.request.outputs.mode }}
           DRY_RUN: ${{ steps.request.outputs.dry_run }}
           MAX_FILES: ${{ steps.request.outputs.max_files }}
           CHUNK_MIB: ${{ steps.request.outputs.chunk_mib }}
@@ -300,7 +318,7 @@ jobs:
           PREFETCH: ${{ steps.request.outputs.prefetch }}
         run: |
           set -o pipefail
-          args=(--destination "$DESTINATION" --max-files "$MAX_FILES" --chunk-mib "$CHUNK_MIB" --duplicate-policy "$DUPLICATE_POLICY")
+          args=(--destination "$DESTINATION" --mode "$MODE" --max-files "$MAX_FILES" --chunk-mib "$CHUNK_MIB" --duplicate-policy "$DUPLICATE_POLICY")
           args+=(--file-attempts "$FILE_RETRIES" --retry-rounds "$RETRY_ROUNDS" --max-runtime-seconds "$MAX_RUNTIME_SECONDS")
           args+=(--concurrency "$CONCURRENCY" --prefetch "$PREFETCH")
           if [ -n "$SOURCE_QUERY" ]; then args+=(--query "$SOURCE_QUERY"); fi
