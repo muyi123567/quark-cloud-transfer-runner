@@ -353,9 +353,24 @@ jobs:
                       events.append(parsed)
 
           summary = next((e for e in reversed(events) if e.get("event") == "summary"), None)
+          incremental = next((e for e in reversed(events) if e.get("event") == "incremental_plan"), None)
           lines = ["## Quark to Google Drive", ""]
-          if summary is None:
-              lines.append("No `summary` event was found: the transfer stopped before completing its sweep.")
+          if incremental is not None:
+              counts = incremental.get("counts") or {}
+              lines += [
+                  "- mode: incremental",
+                  f"- unchanged: {counts.get('unchanged', 0)}",
+                  f"- new: {counts.get('new', 0)}",
+                  f"- modified: {counts.get('modified', 0)}",
+                  f"- missing from current source: {counts.get('missing', 0)}",
+                  f"- conflicts: {counts.get('conflict', 0)}",
+                  f"- files requiring transfer: {incremental.get('transfer_files', 0)}",
+                  f"- bytes requiring transfer: {incremental.get('transfer_bytes', 0)}",
+                  f"- collapsed re-transfer branches: {json.dumps(incremental.get('aliases') or {}, ensure_ascii=False)}",
+                  "",
+              ]
+          elif summary is None:
+              lines.append("No `summary` or `incremental_plan` event was found: the transfer stopped before completing its sweep.")
           else:
               lines += [
                   f"- files planned: {summary.get('total')}",
