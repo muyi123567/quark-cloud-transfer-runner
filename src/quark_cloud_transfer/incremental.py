@@ -68,6 +68,7 @@ def normalize_retransfer_branches(
     items: list[QuarkItem],
     *,
     source_path: str,
+    reference_drive_items: Optional[list[DriveInventoryItem]] = None,
     min_overlap_ratio: float = 0.60,
     min_overlap_files: int = 2,
 ) -> tuple[dict[str, list[QuarkItem]], dict[str, str]]:
@@ -80,14 +81,23 @@ def normalize_retransfer_branches(
 
     rel_items = [(_relative_source_path(item, source_path), item) for item in items]
     tops = {_top_component(rel) for rel, _ in rel_items if rel}
+    drive_rows = reference_drive_items or []
+    drive_tops = {_top_component(item.path) for item in drive_rows if item.path}
     aliases: dict[str, str] = {}
 
     for top in sorted(tops):
         canonical = _candidate_canonical_top(top)
-        if not canonical or canonical not in tops:
+        if not canonical or (canonical not in tops and canonical not in drive_tops):
             continue
         left = _branch_signature(rel_items, top)
-        right = _branch_signature(rel_items, canonical)
+        if canonical in tops:
+            right = _branch_signature(rel_items, canonical)
+        else:
+            right = {
+                (_rest_after_top(item.path), int(item.size))
+                for item in drive_rows
+                if _top_component(item.path) == canonical and _rest_after_top(item.path)
+            }
         if not left or not right:
             continue
         overlap = len(left & right)
@@ -137,7 +147,11 @@ def build_incremental_plan(
     source_path: str,
     drive_items: list[DriveInventoryItem],
 ) -> tuple[list[IncrementalItem], dict[str, str]]:
-    logical, aliases = normalize_retransfer_branches(items, source_path=source_path)
+    logical, aliases = normalize_retransfer_branches(
+        items,
+        source_path=source_path,
+        reference_drive_items=drive_items,
+    )
     drive_by_path = {item.path: item for item in drive_items}
     plan: list[IncrementalItem] = []
     seen_paths: set[str] = set()
