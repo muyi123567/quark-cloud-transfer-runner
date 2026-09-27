@@ -1,11 +1,11 @@
 {
-  "request_id": "2026-09-27-quark-cdn-retry-resume",
+  "request_id": "2026-09-27-daguan-usage-docs-dryrun",
   "query": "",
-  "source_path": "/来自：分享/澄潇宇数学大观",
+  "source_path": "/转存的内容/大观使用说明",
   "source_fid": "",
-  "destination": "考研_AI_KB/01_SOURCE_INBOX/数学/澄潇宇数学大观",
-  "dry_run": false,
-  "max_files": 600,
+  "destination": "考研_AI_KB/01_SOURCE_INBOX/数学/澄潇宇数学大观/大观使用说明",
+  "dry_run": true,
+  "max_files": 20,
   "chunk_mib": 16,
   "duplicate_policy": "skip"
 }
