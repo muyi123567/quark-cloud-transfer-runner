@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from threading import RLock
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
@@ -67,14 +68,22 @@ class QuarkClient:
         timeout: int = 45,
         cdn_connect_timeout: float = CDN_CONNECT_TIMEOUT_SECONDS,
         cdn_read_timeout: float = CDN_READ_TIMEOUT_SECONDS,
+        proxy: Optional[str] = None,
     ) -> None:
         if cdn_connect_timeout <= 0 or cdn_read_timeout <= 0:
             raise QuarkError("CDN timeouts must be positive")
         self.timeout = timeout
         self.cdn_connect_timeout = cdn_connect_timeout
         self.cdn_read_timeout = cdn_read_timeout
+        self.proxy = (proxy or "").strip() or None
         self.session = session or requests.Session()
+        # trust_env stays False so ambient runner proxies are never picked up
+        # implicitly, but an explicit proxy is honored: the Quark CDN leg is a
+        # mainland link and is the part worth routing through a better egress.
         self.session.trust_env = False
+        if self.proxy:
+            self.session.proxies.update({"http": self.proxy, "https": self.proxy})
+        self._state_lock = RLock()
         self._cookies = _parse_cookie(cookie)
         self.cookie = _format_cookie(self._cookies)
         self._last_forced_refresh = 0.0
@@ -99,17 +108,20 @@ class QuarkClient:
         response_cookies = getattr(response, "cookies", None)
         if response_cookies is None:
             return
-        changed = False
-        for name in _COOKIE_REFRESH_KEYS:
-            try:
-                value = response_cookies.get(name)
-            except Exception:
-                value = None
-            if value and self._cookies.get(name) != value:
-                self._cookies[name] = str(value)
-                changed = True
-        if changed:
-            self.cookie = _format_cookie(self._cookies)
+        # Rotating cookies are shared state: several worker threads may stream
+        # from the CDN at the same time.
+        with self._state_lock:
+            changed = False
+            for name in _COOKIE_REFRESH_KEYS:
+                try:
+                    value = response_cookies.get(name)
+                except Exception:
+                    value = None
+                if value and self._cookies.get(name) != value:
+                    self._cookies[name] = str(value)
+                    changed = True
+            if changed:
+                self.cookie = _format_cookie(self._cookies)
 
     def _response_json(self, response: requests.Response, operation: str) -> Dict[str, Any]:
         self._merge_cookie_updates(response)
@@ -133,19 +145,22 @@ class QuarkClient:
         # __puus is short-lived. Omitting only that cookie asks Quark to rotate it
         # while retaining the long-lived login cookies. Keep the refreshed value
         # in memory only; never print or persist it.
-        response = self.session.get(
-            QUARK_CONFIG,
-            params=QUARK_COMMON_QUERY,
-            headers=self._cookie_header(omit={"__puus"}),
-            timeout=self.timeout,
-        )
-        self._response_json(response, "Quark session refresh")
-        self._last_forced_refresh = time.monotonic()
+        # One rotation at a time: concurrent rotations would fight over __puus.
+        with self._state_lock:
+            response = self.session.get(
+                QUARK_CONFIG,
+                params=QUARK_COMMON_QUERY,
+                headers=self._cookie_header(omit={"__puus"}),
+                timeout=self.timeout,
+            )
+            self._response_json(response, "Quark session refresh")
+            self._last_forced_refresh = time.monotonic()
 
     def _ensure_download_session_fresh(self) -> None:
-        age = time.monotonic() - self._last_forced_refresh
-        if self._last_forced_refresh == 0.0 or age >= _DOWNLOAD_REFRESH_SECONDS:
-            self.refresh_session()
+        with self._state_lock:
+            age = time.monotonic() - self._last_forced_refresh
+            if self._last_forced_refresh == 0.0 or age >= _DOWNLOAD_REFRESH_SECONDS:
+                self.refresh_session()
 
     def list_dir(self, parent_fid: str, page_size: int = 100) -> Iterator[QuarkItem]:
         page = 1

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any, Optional
 
 import pytest
@@ -141,10 +143,14 @@ class RecordingDrive:
         self.chunks: list[tuple[str, int, int, bytes]] = []
         self.status_probes: list[str] = []
         self.choose_calls: list[str] = []
+        self.folder_calls: list[str] = []
         self._name = "a.bin"
         self._size = 0
 
     def ensure_folder_path(self, destination: str, *, root_id: str) -> str:
+        self.folder_calls.append(destination)
+        if root_id == "parent":
+            return "sub-parent"
         return "parent"
 
     def choose_destination(
@@ -199,6 +205,9 @@ def make_service(
     retry_rounds: int = 0,
     retry_round_delay_seconds: float = 0.0,
     max_runtime_seconds: float = 0.0,
+    concurrency: int = 1,
+    prefetch: int = 1,
+    prefetch_min_bytes: int = 0,
     sleep: Any = None,
     clock: Any = None,
     events: Optional[list[tuple[str, dict[str, Any]]]] = None,
@@ -226,6 +235,9 @@ def make_service(
         retry_rounds=retry_rounds,
         retry_round_delay_seconds=retry_round_delay_seconds,
         max_runtime_seconds=max_runtime_seconds,
+        concurrency=concurrency,
+        prefetch=prefetch,
+        prefetch_min_bytes=prefetch_min_bytes,
         **kwargs,
     )
 
@@ -394,6 +406,106 @@ def test_runtime_budget_defers_remaining_files() -> None:
     assert [entry["name"] for entry in summary["deferred_files"]] == ["b.bin", "c.bin"]
 
 
+class PrefetchQuark(ResilientQuark):
+    """Records how many Range fetches overlap, and can fail one of them once."""
+
+    def __init__(
+        self,
+        items: list[QuarkItem],
+        *,
+        hold_seconds: float = 0.0,
+        fail_offsets: frozenset[int] = frozenset(),
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(items, **kwargs)
+        self.hold_seconds = hold_seconds
+        self.fail_offsets = set(fail_offsets)
+        self.offsets: list[int] = []
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self._lock = threading.Lock()
+
+    def fetch_range(self, url: str, start: int, end: int) -> bytes:
+        with self._lock:
+            self.offsets.append(start)
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            if self.hold_seconds:
+                time.sleep(self.hold_seconds)
+            if start in self.fail_offsets:
+                self.fail_offsets.discard(start)
+                raise QuarkCdnError(
+                    f"Quark Range {start}-{end} fetch failed: read timed out"
+                )
+            return super().fetch_range(url, start, end)
+        finally:
+            with self._lock:
+                self.in_flight -= 1
+
+
+def test_large_file_prefetches_in_parallel_but_uploads_in_order() -> None:
+    item = QuarkItem("fid-1", "big.bin", "/big.bin", 8, False)
+    quark = PrefetchQuark([item], hold_seconds=0.05)
+    drive = RecordingDrive()
+
+    results = make_service(
+        quark,
+        drive,
+        chunk_size=2,
+        prefetch=3,
+        prefetch_min_bytes=0,
+    ).run(query="a", destination="inbox", dry_run=False)
+
+    assert results[0].status == "ok"
+    # Three CDN fetches were in flight at once...
+    assert quark.max_in_flight == 3
+    assert sorted(quark.offsets) == [0, 2, 4, 6]
+    # ...while Drive still received the chunks strictly in order.
+    assert [start for _, start, _, _ in drive.chunks] == [0, 2, 4, 6]
+
+
+def test_small_files_use_the_serial_range_path() -> None:
+    item = QuarkItem("fid-1", "small.bin", "/small.bin", 8, False)
+    quark = PrefetchQuark([item], hold_seconds=0.02)
+    drive = RecordingDrive()
+
+    results = make_service(
+        quark,
+        drive,
+        chunk_size=2,
+        prefetch=3,
+        prefetch_min_bytes=1024,
+    ).run(query="a", destination="inbox", dry_run=False)
+
+    assert results[0].status == "ok"
+    assert quark.max_in_flight == 1
+    assert [start for _, start, _, _ in drive.chunks] == [0, 2, 4, 6]
+
+
+def test_prefetch_failure_resumes_at_the_committed_offset() -> None:
+    item = QuarkItem("fid-1", "big.bin", "/big.bin", 8, False)
+    quark = PrefetchQuark([item], fail_offsets=frozenset({2}))
+    drive = RecordingDrive(committed=2)
+    sleeps: list[float] = []
+
+    results = make_service(
+        quark,
+        drive,
+        chunk_size=2,
+        prefetch=3,
+        prefetch_min_bytes=0,
+        sleep=sleeps.append,
+    ).run(query="a", destination="inbox", dry_run=False)
+
+    assert results[0].status == "ok"
+    # Only the first chunk was committed before the failure; the retry resumed
+    # there with a fresh download URL instead of re-sending it.
+    assert [start for _, start, _, _ in drive.chunks] == [0, 2, 4, 6]
+    assert sleeps == [5.0]
+    assert len({url for _, url in quark.download_requests}) == 2
+
+
 class StubService:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         pass
@@ -489,8 +601,162 @@ def test_transfer_retries_raw_connection_errors() -> None:
     results = service.run(query="a", destination="inbox", dry_run=False)
 
     assert results[0].status == "ok"
-    assert sleeps == [5.0]
+    # A refused connection means "this host is bad", so the first retry is
+    # immediate instead of waiting out the configured backoff.
+    assert sleeps == [0.0]
     assert quark.calls == 2
+
+
+def test_connect_failure_retries_immediately_but_read_timeout_backs_off() -> None:
+    """Only connect-class failures skip the first backoff."""
+
+    class TimeoutQuark(ResilientQuark):
+        def __init__(self, *args: Any, cause: BaseException, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.cause = cause
+            self.calls = 0
+
+        def probe_range(self, url: str, size: int) -> bool:
+            self.calls += 1
+            if self.calls == 1:
+                raise QuarkCdnError(f"Quark CDN range probe failed: {self.cause}") from self.cause
+            return True
+
+    item = QuarkItem("fid-1", "a.bin", "/a.bin", 4, False)
+
+    connect_sleeps: list[float] = []
+    connect = TimeoutQuark(
+        [item],
+        cause=requests.exceptions.ConnectTimeout("connect timed out"),
+    )
+    make_service(connect, RecordingDrive(), sleep=connect_sleeps.append).run(
+        query="a",
+        destination="inbox",
+        dry_run=False,
+    )
+    assert connect_sleeps == [0.0]
+
+    read_sleeps: list[float] = []
+    read = TimeoutQuark(
+        [item],
+        cause=requests.exceptions.ReadTimeout("read timed out"),
+    )
+    make_service(read, RecordingDrive(), sleep=read_sleeps.append).run(
+        query="a",
+        destination="inbox",
+        dry_run=False,
+    )
+    assert read_sleeps == [5.0]
+
+
+class BarrierQuark(ResilientQuark):
+    """Fails unless two files really are in flight at the same time."""
+
+    def __init__(self, *args: Any, barrier: threading.Barrier, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.barrier = barrier
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self._lock = threading.Lock()
+
+    def fetch_range(self, url: str, start: int, end: int) -> bytes:
+        with self._lock:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            self.barrier.wait()
+        finally:
+            with self._lock:
+                self.in_flight -= 1
+        return super().fetch_range(url, start, end)
+
+
+def test_files_transfer_in_parallel() -> None:
+    items = [
+        QuarkItem("fid-1", "a.bin", "/a.bin", 4, False),
+        QuarkItem("fid-2", "b.bin", "/b.bin", 4, False),
+    ]
+    barrier = threading.Barrier(2, timeout=5)
+    quark = BarrierQuark(items, barrier=barrier)
+    drive = RecordingDrive()
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    results = make_service(
+        quark,
+        drive,
+        concurrency=2,
+        events=events,
+    ).run(query="a", destination="inbox", dry_run=False)
+
+    assert [result.status for result in results] == ["ok", "ok"]
+    assert quark.max_in_flight == 2
+
+
+def test_parallel_files_share_one_subfolder() -> None:
+    class SameFolderQuark(ResilientQuark):
+        def resolve_path(self, source_path: str, *, root_fid: str = "0") -> QuarkItem:
+            return QuarkItem("dir-1", "root", "/root", 0, True)
+
+        def expand(
+            self,
+            item: QuarkItem,
+            *,
+            max_depth: int,
+            max_nodes: int,
+        ) -> list[QuarkItem]:
+            return [
+                QuarkItem("fid-1", "a.bin", "/root/sub/a.bin", 4, False),
+                QuarkItem("fid-2", "b.bin", "/root/sub/b.bin", 4, False),
+                QuarkItem("fid-3", "c.bin", "/root/sub/c.bin", 4, False),
+            ]
+
+    quark = SameFolderQuark(
+        [
+            QuarkItem("fid-1", "a.bin", "/root/sub/a.bin", 4, False),
+            QuarkItem("fid-2", "b.bin", "/root/sub/b.bin", 4, False),
+            QuarkItem("fid-3", "c.bin", "/root/sub/c.bin", 4, False),
+        ]
+    )
+    drive = RecordingDrive()
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    results = make_service(
+        quark,
+        drive,
+        concurrency=3,
+        events=events,
+    ).run(source_path="/root", destination="inbox", dry_run=False)
+
+    assert [result.status for result in results] == ["ok", "ok", "ok"]
+    # Three workers, one subfolder: it must be created exactly once.
+    assert drive.folder_calls.count("sub") == 1
+    assert [event for event, _ in events].count("drive_subfolder_ready") == 1
+
+
+def test_parallel_sweep_isolates_a_dead_file() -> None:
+    items = [
+        QuarkItem("fid-1", "a.bin", "/a.bin", 4, False),
+        QuarkItem("fid-2", "b.bin", "/b.bin", 4, False),
+        QuarkItem("fid-3", "c.bin", "/c.bin", 4, False),
+        QuarkItem("fid-4", "d.bin", "/d.bin", 4, False),
+    ]
+    quark = ResilientQuark(items, dead_fids=frozenset({"fid-2", "fid-4"}))
+    drive = RecordingDrive()
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    results = make_service(
+        quark,
+        drive,
+        concurrency=4,
+        file_attempts=1,
+        events=events,
+    ).run(query="a", destination="inbox", dry_run=False)
+
+    by_name = {result.name: result.status for result in results}
+    assert by_name == {"a.bin": "ok", "b.bin": "failed", "c.bin": "ok", "d.bin": "failed"}
+    summary = [payload for event, payload in events if event == "summary"][0]
+    assert summary["ok"] == 2
+    assert summary["failed"] == 2
 
 
 def test_cli_wires_the_resilience_knobs_into_the_service(monkeypatch, capsys) -> None:
@@ -533,6 +799,14 @@ def test_cli_wires_the_resilience_knobs_into_the_service(monkeypatch, capsys) ->
             "9",
             "--cdn-read-timeout",
             "60",
+            "--concurrency",
+            "6",
+            "--prefetch",
+            "2",
+            "--prefetch-min-mib",
+            "8",
+            "--quark-proxy",
+            "http://user:pass@proxy.example:3128",
         ]
     )
     capsys.readouterr()
@@ -542,9 +816,16 @@ def test_cli_wires_the_resilience_knobs_into_the_service(monkeypatch, capsys) ->
     assert captured["retry_rounds"] == 3
     assert captured["retry_round_delay_seconds"] == 7.0
     assert captured["max_runtime_seconds"] == 120.0
+    assert captured["concurrency"] == 6
+    assert captured["prefetch"] == 2
+    assert captured["prefetch_min_bytes"] == 8 * 1024 * 1024
     assert captured["quark"] == (
         "quark",
-        {"cdn_connect_timeout": 9.0, "cdn_read_timeout": 60.0},
+        {
+            "cdn_connect_timeout": 9.0,
+            "cdn_read_timeout": 60.0,
+            "proxy": "http://user:pass@proxy.example:3128",
+        },
     )
 
 

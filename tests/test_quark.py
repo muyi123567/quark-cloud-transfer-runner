@@ -55,6 +55,7 @@ class FakeResponse:
 class FakeSession:
     def __init__(self) -> None:
         self.headers: dict[str, str] = {}
+        self.proxies: dict[str, str] = {}
         self.get_calls: list[dict[str, Any]] = []
         self.post_calls: list[dict[str, Any]] = []
         self.responses: list[Any] = []
@@ -300,3 +301,26 @@ def test_open_stream_returns_a_live_response() -> None:
     response = client.open_stream("https://dl-pc-zb.drive.quark.cn/x")
 
     assert response.status_code == 200
+
+
+def test_explicit_proxy_is_applied_to_the_session() -> None:
+    session = FakeSession()
+    QuarkClient(
+        "__puus=secret",
+        session=session,  # type: ignore[arg-type]
+        proxy="http://user:pass@proxy.example:3128",
+    )
+
+    # An explicit proxy is honored even though trust_env stays False, so only
+    # the Quark leg is routed through it.
+    assert session.proxies["http"] == "http://user:pass@proxy.example:3128"
+    assert session.proxies["https"] == "http://user:pass@proxy.example:3128"
+    assert session.trust_env is False
+
+
+def test_no_proxy_keeps_the_session_direct() -> None:
+    session = FakeSession()
+    client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
+
+    assert session.proxies == {}
+    assert client.proxy is None

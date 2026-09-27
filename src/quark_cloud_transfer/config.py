@@ -17,6 +17,7 @@ DEFAULT_MAX_NODES = 100_000
 @dataclass(frozen=True)
 class Settings:
     quark_cookie: str
+    quark_proxy: Optional[str]
     gdrive_oauth: Optional[dict[str, Any]]
     gdrive_root_folder_id: str
     chunk_size: int
@@ -108,6 +109,10 @@ def load_settings(
     )
     oauth = _parse_oauth_json(oauth_raw)
 
+    # Optional egress for the Quark CDN leg only. Keep it in a secret: a proxy
+    # URL can carry credentials.
+    quark_proxy = (env.get("QUARK_PROXY") or "").strip() or None
+
     chunk_size = chunk_mib * 1024 * 1024
     _validate_chunk_size(chunk_size)
     if max_files < 1:
@@ -126,6 +131,7 @@ def load_settings(
     )
     return Settings(
         quark_cookie=quark_cookie,
+        quark_proxy=quark_proxy,
         gdrive_oauth=oauth,
         gdrive_root_folder_id=root_id,
         chunk_size=chunk_size,

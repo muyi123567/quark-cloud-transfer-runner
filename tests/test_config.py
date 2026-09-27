@@ -49,3 +49,22 @@ def test_rejects_non_aligned_chunk_size() -> None:
             chunk_mib=0,
             env={"QUARK_COOKIE": "a=1; __puus=secret"},
         )
+
+
+def test_reads_the_optional_quark_proxy() -> None:
+    settings = load_settings(
+        require_drive=False,
+        env={
+            "QUARK_COOKIE": "a=1; __puus=secret",
+            "QUARK_PROXY": "http://proxy.example:3128",
+        },
+    )
+    assert settings.quark_proxy == "http://proxy.example:3128"
+
+
+def test_quark_proxy_defaults_to_direct() -> None:
+    settings = load_settings(
+        require_drive=False,
+        env={"QUARK_COOKIE": "a=1; __puus=secret"},
+    )
+    assert settings.quark_proxy is None

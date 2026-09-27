@@ -39,3 +39,14 @@ def test_redacts_bare_signed_download_path_from_requests_errors() -> None:
     assert "8JImeSAf" not in redacted
     assert "auth_key=secret" not in redacted
     assert "ConnectTimeoutError" in redacted
+
+
+def test_redacts_credentials_inside_a_proxy_url() -> None:
+    text = (
+        "ProxyError: Cannot connect to proxy "
+        "http://alice:s3cret@proxy.example:3128 while reading the CDN"
+    )
+    redacted = redact_text(text)
+    assert "s3cret" not in redacted
+    assert "alice" not in redacted
+    assert "proxy.example:3128" in redacted

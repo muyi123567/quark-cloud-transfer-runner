@@ -4,6 +4,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -43,11 +44,20 @@ class GoogleDriveClient:
         self.session.trust_env = False
         self._access_token: Optional[str] = None
         self._expires_at = 0.0
+        self._token_lock = Lock()
 
     def _token(self, *, force: bool = False) -> str:
         now = time.time()
         if not force and self._access_token and now < self._expires_at - 60:
             return self._access_token
+        # Several upload workers can hit the token at once; refresh once.
+        with self._token_lock:
+            now = time.time()
+            if not force and self._access_token and now < self._expires_at - 60:
+                return self._access_token
+            return self._refresh_token(now)
+
+    def _refresh_token(self, now: float) -> str:
         response = self.session.post(
             OAUTH_TOKEN_URL,
             data={

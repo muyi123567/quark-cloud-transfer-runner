@@ -19,6 +19,8 @@ _PATTERNS = [
     # The bare signed-download path that requests embeds in exception text,
     # e.g. "url: /8JImeSAf/5439150331/530557ed.../...?abt=8_0_&auth_key=...".
     re.compile(r"(?i)(url:\s*)(/[^\s?]*\?[^\s\"']*)"),
+    # Credentials embedded in a proxy URL, e.g. "http://user:pass@host:3128".
+    re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"),
 ]
 
 

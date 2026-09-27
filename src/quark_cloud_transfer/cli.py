@@ -19,7 +19,10 @@ from .quark import (
 )
 from .redaction import redact_text
 from .transfer import (
+    DEFAULT_CONCURRENCY,
     DEFAULT_FILE_ATTEMPTS,
+    DEFAULT_PREFETCH,
+    DEFAULT_PREFETCH_MIN_BYTES,
     DEFAULT_RETRY_ROUND_DELAY_SECONDS,
     DEFAULT_RETRY_ROUNDS,
     TransferService,
@@ -90,6 +93,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=CDN_READ_TIMEOUT_SECONDS,
         help="Quark CDN read timeout in seconds.",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=DEFAULT_CONCURRENCY,
+        help="Files transferred in parallel. Each keeps its own URL and upload session.",
+    )
+    parser.add_argument(
+        "--prefetch",
+        type=int,
+        default=DEFAULT_PREFETCH,
+        help="Parallel Range fetches inside one large file (upload stays sequential).",
+    )
+    parser.add_argument(
+        "--prefetch-min-mib",
+        type=float,
+        default=DEFAULT_PREFETCH_MIN_BYTES / (1024 * 1024),
+        help="Only files at least this large use --prefetch parallel Range fetches.",
+    )
+    parser.add_argument(
+        "--quark-proxy",
+        default=None,
+        help="Optional HTTP(S) proxy for the Quark CDN leg only. Defaults to QUARK_PROXY.",
+    )
     return parser
 
 
@@ -105,10 +131,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             duplicate_policy=args.duplicate_policy,
             root_folder_id=args.drive_root_id,
         )
+        quark_proxy = (args.quark_proxy or settings.quark_proxy or "").strip() or None
         quark = QuarkClient(
             settings.quark_cookie,
             cdn_connect_timeout=args.cdn_connect_timeout,
             cdn_read_timeout=args.cdn_read_timeout,
+            proxy=quark_proxy,
         )
         drive = (
             None
@@ -129,6 +157,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             retry_rounds=args.retry_rounds,
             retry_round_delay_seconds=args.retry_round_delay,
             max_runtime_seconds=args.max_runtime_seconds,
+            concurrency=args.concurrency,
+            prefetch=args.prefetch,
+            prefetch_min_bytes=int(args.prefetch_min_mib * 1024 * 1024),
         )
         results = service.run(
             destination=args.destination,

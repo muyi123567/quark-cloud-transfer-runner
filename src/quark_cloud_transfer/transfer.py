@@ -3,7 +3,9 @@ from __future__ import annotations
 import mimetypes
 import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Optional
 
 import requests
@@ -24,6 +26,13 @@ DEFAULT_FILE_BACKOFF_SECONDS: tuple[float, ...] = (5.0, 15.0, 30.0, 60.0, 120.0)
 # Extra sweeps over the failed set after the first pass over every file.
 DEFAULT_RETRY_ROUNDS = 2
 DEFAULT_RETRY_ROUND_DELAY_SECONDS = 60.0
+# Files transferred in parallel. Each file keeps its own download URL and its
+# own Drive resumable session, so files are independent of each other.
+DEFAULT_CONCURRENCY = 4
+# Within one large file, several Range chunks may be fetched from the CDN at
+# once; the Drive side still receives them strictly in order.
+DEFAULT_PREFETCH = 3
+DEFAULT_PREFETCH_MIN_BYTES = 256 * 1024 * 1024
 
 # Failures that a fresh download URL plus backoff can plausibly repair:
 # ConnectTimeout, ReadTimeout, ConnectionError, ChunkedEncodingError, and the
@@ -32,6 +41,26 @@ _RETRYABLE_FILE_ERRORS: tuple[type[BaseException], ...] = (
     QuarkCdnError,
     requests.RequestException,
 )
+
+
+def _is_connect_class_failure(error: BaseException) -> bool:
+    """True when the CDN never accepted a connection, or rejected the URL.
+
+    Those two cases are worth retrying immediately against a *different* node
+    instead of sleeping first: the node itself is the problem.
+    """
+
+    seen: list[BaseException] = []
+    current: Optional[BaseException] = error
+    while current is not None and len(seen) < 4 and current not in seen:
+        seen.append(current)
+        if isinstance(current, requests.exceptions.ConnectionError):
+            # Covers ConnectTimeout and ProxyError too.
+            return True
+        if "rejected the signed download URL" in str(current):
+            return True
+        current = current.__cause__
+    return False
 
 
 @dataclass
@@ -61,6 +90,9 @@ class TransferService:
         retry_rounds: int = DEFAULT_RETRY_ROUNDS,
         retry_round_delay_seconds: float = DEFAULT_RETRY_ROUND_DELAY_SECONDS,
         max_runtime_seconds: float = 0.0,
+        concurrency: int = DEFAULT_CONCURRENCY,
+        prefetch: int = DEFAULT_PREFETCH,
+        prefetch_min_bytes: int = DEFAULT_PREFETCH_MIN_BYTES,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -72,6 +104,12 @@ class TransferService:
             raise TransferError("retry_round_delay_seconds cannot be negative")
         if max_runtime_seconds < 0:
             raise TransferError("max_runtime_seconds cannot be negative")
+        if concurrency < 1:
+            raise TransferError("concurrency must be at least 1")
+        if prefetch < 1:
+            raise TransferError("prefetch must be at least 1")
+        if prefetch_min_bytes < 0:
+            raise TransferError("prefetch_min_bytes cannot be negative")
         self.quark = quark
         self.drive = drive
         self.chunk_size = chunk_size
@@ -80,14 +118,33 @@ class TransferService:
         self.max_nodes = max_nodes
         self.duplicate_policy = duplicate_policy
         self.drive_root_id = drive_root_id
-        self.emit = emit
+        # Workers share one event stream; keep JSON lines from interleaving.
+        self._emit_lock = Lock()
+        self._raw_emit = emit
+
+        def emit_locked(event: str, **payload: Any) -> None:
+            with self._emit_lock:
+                self._raw_emit(event, **payload)
+
+        self.emit = emit_locked
         self.file_attempts = file_attempts
         self.file_backoff_seconds = tuple(float(value) for value in file_backoff_seconds)
         self.retry_rounds = retry_rounds
         self.retry_round_delay_seconds = float(retry_round_delay_seconds)
         self.max_runtime_seconds = float(max_runtime_seconds)
+        self.concurrency = concurrency
+        self.prefetch = prefetch
+        self.prefetch_min_bytes = prefetch_min_bytes
+        self._folder_lock = Lock()
         self._sleep = sleep
         self._clock = clock
+
+    def _prefetch_depth(self, size: int) -> int:
+        """Parallel Range fetches to use for one file."""
+
+        if self.prefetch <= 1 or size < self.prefetch_min_bytes:
+            return 1
+        return self.prefetch
 
     def _file_backoff(self, failed_attempt: int) -> float:
         """Backoff before retrying after ``failed_attempt`` (1-based)."""
@@ -209,60 +266,46 @@ class TransferService:
             if source_root_name:
                 source_root_path = f"/{source_root_name}"
 
+        context = (parent_id, folder_cache, source_root_path)
         failed: list[QuarkItem] = []
         deferred: list[QuarkItem] = []
         budget_exhausted = False
-        for index, item in enumerate(items):
-            if self._runtime_exceeded(started):
-                deferred = list(items[index:])
-                budget_exhausted = True
-                self.emit(
-                    "runtime_budget_exhausted",
-                    remaining=len(deferred),
-                    max_runtime_seconds=self.max_runtime_seconds,
-                    elapsed_seconds=round(self._clock() - started, 1),
-                )
-                break
-            result = self._transfer_one(
-                item,
-                self._parent_for(item, parent_id, folder_cache, source_root_path),
+        with ThreadPoolExecutor(
+            max_workers=self.concurrency,
+            thread_name_prefix="transfer",
+        ) as pool:
+            swept, failed, deferred, budget_exhausted = self._sweep(
+                pool,
+                items,
+                context,
+                started,
             )
-            outcomes[item.fid] = result
-            if result.status == "failed":
-                failed.append(item)
+            outcomes.update(swept)
 
-        for round_number in range(1, self.retry_rounds + 1):
-            if not failed or budget_exhausted:
-                break
-            self.emit(
-                "retry_round_start",
-                round=round_number,
-                files=len(failed),
-                delay_seconds=self.retry_round_delay_seconds,
-            )
-            if self.retry_round_delay_seconds:
-                self._sleep(self.retry_round_delay_seconds)
-            still_failed: list[QuarkItem] = []
-            for index, item in enumerate(failed):
-                if self._runtime_exceeded(started):
-                    still_failed.extend(failed[index:])
-                    budget_exhausted = True
-                    self.emit(
-                        "runtime_budget_exhausted",
-                        remaining=len(still_failed),
-                        max_runtime_seconds=self.max_runtime_seconds,
-                        elapsed_seconds=round(self._clock() - started, 1),
-                    )
+            for round_number in range(1, self.retry_rounds + 1):
+                if not failed or budget_exhausted:
                     break
-                result = self._transfer_one(
-                    item,
-                    self._parent_for(item, parent_id, folder_cache, source_root_path),
+                self.emit(
+                    "retry_round_start",
+                    round=round_number,
+                    files=len(failed),
+                    delay_seconds=self.retry_round_delay_seconds,
                 )
-                outcomes[item.fid] = result
-                if result.status == "failed":
-                    still_failed.append(item)
-            failed = still_failed
-            self.emit("retry_round_end", round=round_number, still_failed=len(failed))
+                if self.retry_round_delay_seconds:
+                    self._sleep(self.retry_round_delay_seconds)
+                swept, failed, round_deferred, budget_exhausted = self._sweep(
+                    pool,
+                    failed,
+                    context,
+                    started,
+                )
+                outcomes.update(swept)
+                deferred.extend(round_deferred)
+                self.emit(
+                    "retry_round_end",
+                    round=round_number,
+                    still_failed=len(failed),
+                )
 
         for item in deferred:
             outcomes.setdefault(
@@ -291,6 +334,84 @@ class TransferService:
         )
         self._emit_summary(results, items=len(items), started=started)
         return results
+
+    def _sweep(
+        self,
+        pool: ThreadPoolExecutor,
+        items: list[QuarkItem],
+        context: tuple[str, dict[str, str], str],
+        started: float,
+    ) -> tuple[dict[str, TransferResult], list[QuarkItem], list[QuarkItem], bool]:
+        """Transfer ``items`` with bounded concurrency.
+
+        Returns (results by fid, still-failed items, never-started items, and
+        whether the run budget stopped the sweep).
+        """
+
+        results: dict[str, TransferResult] = {}
+        failed: list[QuarkItem] = []
+        deferred: list[QuarkItem] = []
+        budget_exhausted = False
+        pending = list(items)
+        window: dict[Future, QuarkItem] = {}
+        while pending or window:
+            while pending and len(window) < self.concurrency:
+                if self._runtime_exceeded(started):
+                    deferred = list(pending)
+                    pending = []
+                    budget_exhausted = True
+                    self.emit(
+                        "runtime_budget_exhausted",
+                        remaining=len(deferred),
+                        max_runtime_seconds=self.max_runtime_seconds,
+                        elapsed_seconds=round(self._clock() - started, 1),
+                    )
+                    break
+                item = pending.pop(0)
+                window[pool.submit(self._transfer_item, item, context)] = item
+            if not window:
+                break
+            done, _ = wait(list(window), return_when=FIRST_COMPLETED)
+            for future in done:
+                item = window.pop(future)
+                result = future.result()
+                results[item.fid] = result
+                if result.status == "failed":
+                    failed.append(item)
+        return results, failed, deferred, budget_exhausted
+
+    def _transfer_item(
+        self,
+        item: QuarkItem,
+        context: tuple[str, dict[str, str], str],
+    ) -> TransferResult:
+        """Worker entry point; never raises, so one file cannot kill the batch."""
+
+        parent_id, folder_cache, source_root_path = context
+        try:
+            parent = self._parent_for(
+                item,
+                parent_id,
+                folder_cache,
+                source_root_path,
+            )
+            return self._transfer_one(item, parent)
+        except Exception as exc:
+            message = redact_text(exc)
+            self.emit(
+                "file_failed",
+                name=item.name,
+                source_path=item.path,
+                size=item.size,
+                error=message,
+            )
+            return TransferResult(
+                status="failed",
+                name=item.name,
+                source_size=item.size,
+                source_path=item.path,
+                error=message,
+            )
 
     def _emit_summary(
         self,
@@ -341,12 +462,15 @@ class TransferService:
         relative_parent = relative_path.rsplit("/", 1)[0] if "/" in relative_path else ""
         if not relative_parent:
             return parent_id
-        cached = folder_cache.get(relative_parent)
-        if cached:
-            return cached
-        assert self.drive is not None
-        created = self.drive.ensure_folder_path(relative_parent, root_id=parent_id)
-        folder_cache[relative_parent] = created
+        # Serialize the check-and-create so two workers cannot race into two
+        # folders with the same name.
+        with self._folder_lock:
+            cached = folder_cache.get(relative_parent)
+            if cached:
+                return cached
+            assert self.drive is not None
+            created = self.drive.ensure_folder_path(relative_parent, root_id=parent_id)
+            folder_cache[relative_parent] = created
         self.emit(
             "drive_subfolder_ready",
             source_relative_path=relative_parent,
@@ -365,9 +489,19 @@ class TransferService:
         assert self.drive is not None
         state = _UploadState()
         last_error: Optional[str] = None
+        last_exception: Optional[BaseException] = None
         for attempt in range(1, self.file_attempts + 1):
             if attempt > 1:
                 delay = self._file_backoff(attempt - 1)
+                if (
+                    delay
+                    and attempt == 2
+                    and last_exception is not None
+                    and _is_connect_class_failure(last_exception)
+                ):
+                    # The node refused the connection: ask for a new URL and
+                    # try immediately instead of sleeping on a dead host.
+                    delay = 0.0
                 self.emit(
                     "file_retry",
                     name=item.name,
@@ -383,11 +517,13 @@ class TransferService:
                 return self._attempt_file(item, parent_id, state, attempt)
             except _RETRYABLE_FILE_ERRORS as exc:
                 last_error = redact_text(exc)
+                last_exception = exc
                 continue
             except QuarkCloudTransferError as exc:
                 # A deterministic failure (bad metadata, Drive duplicate policy,
                 # Drive rejection) will not improve with a fresh URL.
                 last_error = redact_text(exc)
+                last_exception = exc
                 break
         self.emit(
             "file_failed",
@@ -519,6 +655,81 @@ class TransferService:
         )
 
     def _upload_range(
+        self,
+        session_url: str,
+        source_url: str,
+        size: int,
+        name: str,
+        *,
+        start: int = 0,
+    ) -> dict[str, Any]:
+        """Upload by Range, downloading several chunks ahead of the upload.
+
+        Drive requires resumable chunks strictly in order, so only the *fetch*
+        side is parallelized: a bounded window of chunks is pulled from the CDN
+        while the upload consumes them one by one. A single cross-border
+        connection to the Quark CDN is the throughput ceiling, and this is what
+        lifts it for the few very large files.
+        """
+
+        assert self.drive is not None
+        depth = self._prefetch_depth(size)
+        if depth <= 1:
+            return self._upload_range_serial(
+                session_url,
+                source_url,
+                size,
+                name,
+                start=start,
+            )
+
+        uploaded = start
+        final: Optional[dict[str, Any]] = None
+        pool = ThreadPoolExecutor(max_workers=depth, thread_name_prefix="quark-range")
+        window: dict[int, Future] = {}
+        next_offset = start
+        try:
+            while uploaded < size:
+                while len(window) < depth and next_offset < size:
+                    end = min(next_offset + self.chunk_size, size) - 1
+                    window[next_offset] = pool.submit(
+                        self.quark.fetch_range,
+                        source_url,
+                        next_offset,
+                        end,
+                    )
+                    next_offset = end + 1
+                future = window.pop(uploaded)
+                try:
+                    data = future.result()
+                except BaseException:
+                    for outstanding in window.values():
+                        outstanding.cancel()
+                    raise
+                response = self.drive.put_chunk(
+                    session_url,
+                    start=uploaded,
+                    total=size,
+                    data=data,
+                )
+                uploaded += len(data)
+                self.emit(
+                    "progress",
+                    name=name,
+                    uploaded=uploaded,
+                    total=size,
+                    percent=round(uploaded * 100 / size, 2),
+                )
+                if response.status_code in (200, 201):
+                    final = dict(response.json())
+                    break
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        if not final or uploaded != size:
+            raise TransferError("Drive did not finalize the ranged upload")
+        return final
+
+    def _upload_range_serial(
         self,
         session_url: str,
         source_url: str,
