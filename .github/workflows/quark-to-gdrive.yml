@@ -35,7 +35,7 @@ on:
       chunk_mib:
         description: Streaming chunk size in MiB. Must be a multiple of 0.25 MiB.
         required: true
-        default: "16"
+        default: "64"
         type: string
       duplicate_policy:
         description: Same name and same size always skip; different size follows this policy.
@@ -60,6 +60,16 @@ on:
         required: true
         default: "300"
         type: string
+      concurrency:
+        description: Files transferred in parallel. Each keeps its own URL and upload session.
+        required: true
+        default: "4"
+        type: string
+      prefetch:
+        description: Parallel Range fetches inside one large file. Drive uploads stay sequential.
+        required: true
+        default: "3"
+        type: string
   push:
     branches:
       - main
@@ -82,6 +92,7 @@ jobs:
     timeout-minutes: 355
     env:
       QUARK_COOKIE: ${{ secrets.QUARK_COOKIE }}
+      QUARK_PROXY: ${{ secrets.QUARK_PROXY }}
       GDRIVE_OAUTH_JSON: ${{ secrets.GDRIVE_OAUTH_JSON }}
       GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
       PYTHONUNBUFFERED: "1"
@@ -119,6 +130,8 @@ jobs:
           INPUT_FILE_RETRIES: ${{ inputs.file_retries }}
           INPUT_RETRY_ROUNDS: ${{ inputs.retry_rounds }}
           INPUT_MAX_RUNTIME_MINUTES: ${{ inputs.max_runtime_minutes }}
+          INPUT_CONCURRENCY: ${{ inputs.concurrency }}
+          INPUT_PREFETCH: ${{ inputs.prefetch }}
         run: |
           python - <<'PY'
           import json
@@ -140,6 +153,8 @@ jobs:
                   "file_retries": os.environ.get("INPUT_FILE_RETRIES", "6"),
                   "retry_rounds": os.environ.get("INPUT_RETRY_ROUNDS", "2"),
                   "max_runtime_minutes": os.environ.get("INPUT_MAX_RUNTIME_MINUTES", "300"),
+                  "concurrency": os.environ.get("INPUT_CONCURRENCY", "4"),
+                  "prefetch": os.environ.get("INPUT_PREFETCH", "3"),
               }
 
           def text_value(name, default=""):
@@ -161,6 +176,8 @@ jobs:
           file_retries = text_value("file_retries", "6")
           retry_rounds = text_value("retry_rounds", "2")
           max_runtime_minutes = text_value("max_runtime_minutes", "300")
+          concurrency = text_value("concurrency", "4")
+          prefetch = text_value("prefetch", "3")
 
           selectors = {
               "query": query,
@@ -213,6 +230,20 @@ jobs:
               raise SystemExit("max_runtime_minutes must be between 0 and 340.")
           max_runtime_seconds = str(int(max_runtime_minutes_float * 60))
 
+          try:
+              concurrency_int = int(concurrency)
+          except ValueError:
+              raise SystemExit("concurrency must be an integer.")
+          if not 1 <= concurrency_int <= 16:
+              raise SystemExit("concurrency must be between 1 and 16.")
+
+          try:
+              prefetch_int = int(prefetch)
+          except ValueError:
+              raise SystemExit("prefetch must be an integer.")
+          if not 1 <= prefetch_int <= 8:
+              raise SystemExit("prefetch must be between 1 and 8.")
+
           outputs = {
               "query": query,
               "source_path": source_path,
@@ -225,6 +256,8 @@ jobs:
               "file_retries": str(file_retries_int),
               "retry_rounds": str(retry_rounds_int),
               "max_runtime_seconds": max_runtime_seconds,
+              "concurrency": str(concurrency_int),
+              "prefetch": str(prefetch_int),
           }
           for key, value in outputs.items():
               if "\n" in value or "\r" in value:
@@ -245,6 +278,8 @@ jobs:
               "file_retries": file_retries_int,
               "retry_rounds": retry_rounds_int,
               "max_runtime_seconds": int(max_runtime_seconds),
+              "concurrency": concurrency_int,
+              "prefetch": prefetch_int,
           }, ensure_ascii=False))
           PY
 
@@ -261,10 +296,13 @@ jobs:
           FILE_RETRIES: ${{ steps.request.outputs.file_retries }}
           RETRY_ROUNDS: ${{ steps.request.outputs.retry_rounds }}
           MAX_RUNTIME_SECONDS: ${{ steps.request.outputs.max_runtime_seconds }}
+          CONCURRENCY: ${{ steps.request.outputs.concurrency }}
+          PREFETCH: ${{ steps.request.outputs.prefetch }}
         run: |
           set -o pipefail
           args=(--destination "$DESTINATION" --max-files "$MAX_FILES" --chunk-mib "$CHUNK_MIB" --duplicate-policy "$DUPLICATE_POLICY")
           args+=(--file-attempts "$FILE_RETRIES" --retry-rounds "$RETRY_ROUNDS" --max-runtime-seconds "$MAX_RUNTIME_SECONDS")
+          args+=(--concurrency "$CONCURRENCY" --prefetch "$PREFETCH")
           if [ -n "$SOURCE_QUERY" ]; then args+=(--query "$SOURCE_QUERY"); fi
           if [ -n "$SOURCE_PATH" ]; then args+=(--source-path "$SOURCE_PATH"); fi
           if [ -n "$SOURCE_FID" ]; then args+=(--source-fid "$SOURCE_FID"); fi
