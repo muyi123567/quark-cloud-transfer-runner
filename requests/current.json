@@ -1,11 +1,11 @@
 {
-  "request_id": "2026-09-27-daguan-usage-docs-upload-03",
-  "query": "如何做计划",
+  "request_id": "2026-09-27-daguan-usage-docs-upload-04",
+  "query": "五级习题分类系统",
   "source_path": "",
   "source_fid": "",
   "destination": "考研_AI_KB/01_SOURCE_INBOX/数学/澄潇宇数学大观/大观使用说明",
   "dry_run": false,
-  "max_files": 5,
+  "max_files": 3,
   "chunk_mib": 16,
   "duplicate_policy": "skip"
 }
