@@ -225,7 +225,7 @@ class IncrementalSyncService:
             source_path=source_path,
             root_fid=root_fid,
         )
-        destination_id = self.drive.ensure_folder_path(
+        destination_id = self.drive.resolve_folder_path(
             destination,
             root_id=self.transfer.drive_root_id,
         )
