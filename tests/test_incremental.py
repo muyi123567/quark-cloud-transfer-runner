@@ -98,3 +98,23 @@ def test_different_size_duplicates_without_unique_newest_are_conflict() -> None:
     )
     by_path = {item.logical_path: item.status for item in plan}
     assert by_path["1.高数/x/a.pdf"] == "conflict"
+
+
+def test_retransfer_branch_can_match_drive_baseline_without_source_sibling() -> None:
+    items = [
+        q("b1", "/澄潇宇数学大观/1(1).高数/x/a.pdf", 10, 2),
+        q("b2", "/澄潇宇数学大观/1(1).高数/x/b.pdf", 20, 2),
+        q("b3", "/澄潇宇数学大观/1(1).高数/x/c.pdf", 30, 2),
+    ]
+    drive = [
+        DriveInventoryItem("1.高数/x/a.pdf", "a", 10),
+        DriveInventoryItem("1.高数/x/b.pdf", "b", 20),
+        DriveInventoryItem("1.高数/x/c.pdf", "c", 30),
+    ]
+    plan, aliases = build_incremental_plan(
+        items,
+        source_path="/澄潇宇数学大观",
+        drive_items=drive,
+    )
+    assert aliases == {"1(1).高数": "1.高数"}
+    assert {item.status for item in plan} == {"unchanged"}
