@@ -1,7 +1,7 @@
 {
-  "request_id": "2026-09-27-daguan-usage-docs-maintenance-dryrun",
+  "request_id": "2026-09-27-daguan-usage-docs-direct-shared-dryrun",
   "query": "",
-  "source_path": "/来自：分享/转存的内容/大观使用说明",
+  "source_path": "/来自：分享/大观使用说明",
   "source_fid": "",
   "destination": "考研_AI_KB/01_SOURCE_INBOX/数学/澄潇宇数学大观/大观使用说明",
   "dry_run": true,
