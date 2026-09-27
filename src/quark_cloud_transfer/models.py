@@ -12,6 +12,7 @@ class QuarkItem:
     size: int
     is_dir: bool
     updated_at: Optional[int] = None
+    content_hash: Optional[str] = None
 
 
 @dataclass(frozen=True)
