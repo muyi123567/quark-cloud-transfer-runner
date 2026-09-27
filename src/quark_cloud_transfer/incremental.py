@@ -68,8 +68,8 @@ def normalize_retransfer_branches(
     items: list[QuarkItem],
     *,
     source_path: str,
-    min_overlap_ratio: float = 0.75,
-    min_overlap_files: int = 3,
+    min_overlap_ratio: float = 0.60,
+    min_overlap_files: int = 2,
 ) -> tuple[dict[str, list[QuarkItem]], dict[str, str]]:
     """Map Quark '(1)' re-transfer branches back to their logical sibling.
 
