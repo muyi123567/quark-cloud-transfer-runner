@@ -80,8 +80,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: quark-to-gdrive-usage-docs
-  cancel-in-progress: true
+  group: quark-to-gdrive
+  cancel-in-progress: false
 
 jobs:
   transfer:
