@@ -45,6 +45,21 @@ on:
         options:
           - skip
           - rename
+      file_retries:
+        description: Quark CDN attempts per file. Each attempt requests a fresh download URL.
+        required: true
+        default: "6"
+        type: string
+      retry_rounds:
+        description: Extra sweeps over the failed set after the first pass over every file.
+        required: true
+        default: "2"
+        type: string
+      max_runtime_minutes:
+        description: Soft budget. Stop starting new files this many minutes in, leaving room for the summary.
+        required: true
+        default: "300"
+        type: string
   push:
     branches:
       - main
@@ -62,7 +77,9 @@ jobs:
   transfer:
     if: github.event_name == 'workflow_dispatch' || github.actor == 'muyi123567'
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    # GitHub allows 360 minutes; stop short of it so the failure summary and the
+    # final retry sweep still run inside the same window.
+    timeout-minutes: 355
     env:
       QUARK_COOKIE: ${{ secrets.QUARK_COOKIE }}
       GDRIVE_OAUTH_JSON: ${{ secrets.GDRIVE_OAUTH_JSON }}
@@ -82,6 +99,11 @@ jobs:
       - name: Run self-test
         run: python scripts/self_test.py
 
+      - name: Run unit tests
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pytest -q
+
       - name: Load and validate transfer request
         id: request
         env:
@@ -94,6 +116,9 @@ jobs:
           INPUT_MAX_FILES: ${{ inputs.max_files }}
           INPUT_CHUNK_MIB: ${{ inputs.chunk_mib }}
           INPUT_DUPLICATE_POLICY: ${{ inputs.duplicate_policy }}
+          INPUT_FILE_RETRIES: ${{ inputs.file_retries }}
+          INPUT_RETRY_ROUNDS: ${{ inputs.retry_rounds }}
+          INPUT_MAX_RUNTIME_MINUTES: ${{ inputs.max_runtime_minutes }}
         run: |
           python - <<'PY'
           import json
@@ -112,6 +137,9 @@ jobs:
                   "max_files": os.environ.get("INPUT_MAX_FILES", "10"),
                   "chunk_mib": os.environ.get("INPUT_CHUNK_MIB", "16"),
                   "duplicate_policy": os.environ.get("INPUT_DUPLICATE_POLICY", "skip"),
+                  "file_retries": os.environ.get("INPUT_FILE_RETRIES", "6"),
+                  "retry_rounds": os.environ.get("INPUT_RETRY_ROUNDS", "2"),
+                  "max_runtime_minutes": os.environ.get("INPUT_MAX_RUNTIME_MINUTES", "300"),
               }
 
           def text_value(name, default=""):
@@ -130,6 +158,9 @@ jobs:
           max_files = text_value("max_files", "10")
           chunk_mib = text_value("chunk_mib", "16")
           duplicate_policy = text_value("duplicate_policy", "skip").lower()
+          file_retries = text_value("file_retries", "6")
+          retry_rounds = text_value("retry_rounds", "2")
+          max_runtime_minutes = text_value("max_runtime_minutes", "300")
 
           selectors = {
               "query": query,
@@ -160,6 +191,28 @@ jobs:
           if chunk_mib_float <= 0 or abs(chunk_mib_float * 4 - round(chunk_mib_float * 4)) > 1e-9:
               raise SystemExit("chunk_mib must be positive and a multiple of 0.25 MiB.")
 
+          try:
+              file_retries_int = int(file_retries)
+          except ValueError:
+              raise SystemExit("file_retries must be an integer.")
+          if not 1 <= file_retries_int <= 20:
+              raise SystemExit("file_retries must be between 1 and 20.")
+
+          try:
+              retry_rounds_int = int(retry_rounds)
+          except ValueError:
+              raise SystemExit("retry_rounds must be an integer.")
+          if not 0 <= retry_rounds_int <= 10:
+              raise SystemExit("retry_rounds must be between 0 and 10.")
+
+          try:
+              max_runtime_minutes_float = float(max_runtime_minutes)
+          except ValueError:
+              raise SystemExit("max_runtime_minutes must be numeric.")
+          if max_runtime_minutes_float < 0 or max_runtime_minutes_float > 340:
+              raise SystemExit("max_runtime_minutes must be between 0 and 340.")
+          max_runtime_seconds = str(int(max_runtime_minutes_float * 60))
+
           outputs = {
               "query": query,
               "source_path": source_path,
@@ -169,6 +222,9 @@ jobs:
               "max_files": str(max_files_int),
               "chunk_mib": str(chunk_mib_float).rstrip("0").rstrip("."),
               "duplicate_policy": duplicate_policy,
+              "file_retries": str(file_retries_int),
+              "retry_rounds": str(retry_rounds_int),
+              "max_runtime_seconds": max_runtime_seconds,
           }
           for key, value in outputs.items():
               if "\n" in value or "\r" in value:
@@ -186,6 +242,9 @@ jobs:
               "max_files": max_files_int,
               "chunk_mib": chunk_mib_float,
               "duplicate_policy": duplicate_policy,
+              "file_retries": file_retries_int,
+              "retry_rounds": retry_rounds_int,
+              "max_runtime_seconds": int(max_runtime_seconds),
           }, ensure_ascii=False))
           PY
 
@@ -199,10 +258,85 @@ jobs:
           MAX_FILES: ${{ steps.request.outputs.max_files }}
           CHUNK_MIB: ${{ steps.request.outputs.chunk_mib }}
           DUPLICATE_POLICY: ${{ steps.request.outputs.duplicate_policy }}
+          FILE_RETRIES: ${{ steps.request.outputs.file_retries }}
+          RETRY_ROUNDS: ${{ steps.request.outputs.retry_rounds }}
+          MAX_RUNTIME_SECONDS: ${{ steps.request.outputs.max_runtime_seconds }}
         run: |
+          set -o pipefail
           args=(--destination "$DESTINATION" --max-files "$MAX_FILES" --chunk-mib "$CHUNK_MIB" --duplicate-policy "$DUPLICATE_POLICY")
+          args+=(--file-attempts "$FILE_RETRIES" --retry-rounds "$RETRY_ROUNDS" --max-runtime-seconds "$MAX_RUNTIME_SECONDS")
           if [ -n "$SOURCE_QUERY" ]; then args+=(--query "$SOURCE_QUERY"); fi
           if [ -n "$SOURCE_PATH" ]; then args+=(--source-path "$SOURCE_PATH"); fi
           if [ -n "$SOURCE_FID" ]; then args+=(--source-fid "$SOURCE_FID"); fi
           if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
-          python -m quark_cloud_transfer.cli "${args[@]}"
+          # Tee the JSON event stream so the summary step can read it even when
+          # the transfer exits non-zero with files still outstanding.
+          python -m quark_cloud_transfer.cli "${args[@]}" 2>&1 | tee transfer.log
+
+      - name: Transfer summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          MAX_LISTED = 50
+          events = []
+          log_path = pathlib.Path("transfer.log")
+          if log_path.exists():
+              for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                  line = line.strip()
+                  if not line.startswith("{"):
+                      continue
+                  try:
+                      parsed = json.loads(line)
+                  except ValueError:
+                      continue
+                  if isinstance(parsed, dict) and "event" in parsed:
+                      events.append(parsed)
+
+          summary = next((e for e in reversed(events) if e.get("event") == "summary"), None)
+          lines = ["## Quark to Google Drive", ""]
+          if summary is None:
+              lines.append("No `summary` event was found: the transfer stopped before completing its sweep.")
+          else:
+              lines += [
+                  f"- files planned: {summary.get('total')}",
+                  f"- uploaded: {summary.get('ok')}",
+                  f"- skipped (already present, same name and size): {summary.get('skipped')}",
+                  f"- failed: {summary.get('failed')}",
+                  f"- deferred by the run budget: {summary.get('deferred')}",
+                  f"- elapsed seconds: {summary.get('elapsed_seconds')}",
+                  f"- attempts per file: {summary.get('file_attempts')}",
+                  f"- failure sweeps: {summary.get('retry_rounds')}",
+                  "",
+              ]
+              failures = summary.get("failures") or []
+              if failures:
+                  lines += ["### Failed files", ""]
+                  for entry in failures[:MAX_LISTED]:
+                      lines.append(f"- `{entry.get('name')}`: {entry.get('error')}")
+                  if len(failures) > MAX_LISTED:
+                      lines.append(f"- ...and {len(failures) - MAX_LISTED} more")
+                  lines.append("")
+              deferred_files = summary.get("deferred_files") or []
+              if deferred_files:
+                  lines += ["### Deferred files (rerun to continue)", ""]
+                  for entry in deferred_files[:MAX_LISTED]:
+                      lines.append(f"- `{entry.get('name')}`")
+                  if len(deferred_files) > MAX_LISTED:
+                      lines.append(f"- ...and {len(deferred_files) - MAX_LISTED} more")
+                  lines.append("")
+
+          for event in events:
+              if event.get("event") in {"error", "incomplete"}:
+                  lines.append(f"- `{event.get('event')}`: {json.dumps(event, ensure_ascii=False)}")
+
+          text = "\n".join(lines) + "\n"
+          print(text)
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if step_summary:
+              with open(step_summary, "a", encoding="utf-8") as fh:
+                  fh.write(text)
+          PY
