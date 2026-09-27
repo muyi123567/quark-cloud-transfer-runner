@@ -39,6 +39,16 @@ def _join_path(base: str, name: str) -> str:
     return f"{base.rstrip('/')}/{name}"
 
 
+def _extract_content_hash(raw: Dict[str, Any]) -> Optional[str]:
+    for key in ("md5", "md5_hash", "file_md5", "sha1", "sha1_hash", "hash"):
+        value = raw.get(key)
+        if value:
+            text = str(value).strip()
+            if text:
+                return text
+    return None
+
+
 def _parse_cookie(cookie: str) -> dict[str, str]:
     pairs: dict[str, str] = {}
     for raw in cookie.split(";"):
@@ -204,6 +214,7 @@ class QuarkClient:
                     size=int(raw.get("size") or 0),
                     is_dir=is_dir,
                     updated_at=raw.get("updated_at"),
+                    content_hash=_extract_content_hash(raw),
                 )
             if len(items) < page_size or fresh == 0:
                 break
@@ -237,6 +248,7 @@ class QuarkClient:
                     size=item.size,
                     is_dir=item.is_dir,
                     updated_at=item.updated_at,
+                    content_hash=item.content_hash,
                 )
                 yield current
                 if item.is_dir and depth < max_depth:
