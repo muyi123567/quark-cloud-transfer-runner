@@ -144,3 +144,23 @@ def test_uploaded_bytes_raises_when_the_session_is_gone() -> None:
 
     with pytest.raises(DriveError, match="session is gone"):
         client.uploaded_bytes("https://upload.example/session", 4096)
+
+
+def test_initiate_update_uses_resumable_patch() -> None:
+    session = FakeSession()
+    session.request_response = FakeResponse(
+        status_code=200,
+        headers={"Location": "https://upload.example/update-session"},
+    )
+    client = make_client(session)
+    client._access_token = "access"
+    client._expires_at = 10**12
+
+    url = client.initiate_update("file-1", 123, "application/pdf")
+
+    assert url == "https://upload.example/update-session"
+    call = session.request_calls[0]
+    assert call["method"] == "PATCH"
+    assert call["url"].endswith("/upload/drive/v3/files/file-1")
+    assert call["params"]["uploadType"] == "resumable"
+    assert call["headers"]["X-Upload-Content-Length"] == "123"
