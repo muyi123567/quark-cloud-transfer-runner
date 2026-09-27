@@ -331,6 +331,7 @@ class QuarkClient:
                         size=int(raw.get("size") or 0),
                         is_dir=is_dir,
                         updated_at=raw.get("updated_at"),
+                        content_hash=_extract_content_hash(raw),
                     )
                 )
 
