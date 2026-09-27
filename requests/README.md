@@ -18,6 +18,8 @@ Schema:
 - `file_retries`: optional integer 1..20, Quark CDN attempts per file (default 6)
 - `retry_rounds`: optional integer 0..10, sweeps over the failed set (default 2)
 - `max_runtime_minutes`: optional number 0..340, soft run budget (default 300)
+- `concurrency`: optional integer 1..16, files transferred in parallel (default 4)
+- `prefetch`: optional integer 1..8, parallel Range fetches inside one large file (default 3)
 
 Only the documented keys are read; any other key is ignored, so a small
 `request_id` marker is safe to add when a fresh run is needed without changing
@@ -28,3 +30,5 @@ destination folder is skipped, so re-triggering the same request only transfers
 what is still missing.
 
 Do not store cookies, OAuth JSON, tokens, or client secrets in this directory.
+The optional Quark egress proxy also belongs in a secret (`QUARK_PROXY`), not
+here: a proxy URL can carry credentials.

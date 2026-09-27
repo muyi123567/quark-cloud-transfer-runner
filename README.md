@@ -45,6 +45,8 @@ Use the public runner repository to start transfers.
   the continuous-stream path.
 - Batch isolation: one bad file is recorded and the remaining files continue.
 - Failure sweeps plus a machine-readable run summary.
+- Parallel file transfers plus parallel Range prefetch inside large files.
+- Optional Quark-only egress proxy for a faster route to the mainland CDN.
 - Google Drive resumable upload in bounded in-memory chunks.
 - Same-name and same-size duplicate skip.
 - Final Google Drive byte-size verification.
@@ -196,12 +198,52 @@ For the real transfer, set `dry_run=false`.
 | `file_retries` | `6` | Quark CDN attempts per file; each attempt gets a fresh download URL. |
 | `retry_rounds` | `2` | Extra sweeps over the failed set after the first pass. |
 | `max_runtime_minutes` | `300` | Soft budget; stop starting new files this many minutes in. |
+| `concurrency` | `4` | Files transferred in parallel. |
+| `prefetch` | `3` | Parallel Range fetches inside one large file (Drive uploads stay sequential). |
+| `chunk_mib` | `64` | Range/upload chunk size. |
 
 The job runs the unit tests before the transfer, uses `timeout-minutes: 355` so
 the final sweep and summary still fit inside the GitHub Actions 6-hour limit,
 keeps a single non-cancelling concurrency group, tees the JSON event stream to
 `transfer.log`, and always publishes a job summary with the counts plus the
 failed and deferred file lists.
+
+## Throughput
+
+The Quark download CDN is a mainland node pool reached from an overseas runner,
+and one TCP stream to it tops out around **2.2 MB/s** (measured: a steady 7.5 s
+per 16 MiB chunk on the verified end-to-end run). A 20 GiB package is therefore
+about 2.6 hours if everything is done on one stream. Three things lift that:
+
+- **`--concurrency` (default 4)**: files are independent — each has its own
+  signed URL and its own Drive resumable session — so several are transferred at
+  once. Small and medium files overlap completely.
+- **`--prefetch` (default 3)**: for files at least `--prefetch-min-mib`
+  (default 256 MiB) several Range chunks are fetched from the CDN
+  simultaneously. Drive requires resumable chunks strictly in order, so only the
+  *download* side is parallelized; the upload consumes the window in order. This
+  removes the single-stream floor for the handful of multi-GB files.
+- **`--chunk-mib` (default 64)**: fewer round trips per file.
+
+Memory is bounded by `concurrency × prefetch × chunk_mib` (about 768 MiB at the
+defaults, and only for large files).
+
+If the CDN throttles per account rather than per connection, parallelism buys
+less; the definitive fix is a better egress for the Quark leg only, which
+`QUARK_PROXY` (see below) provides.
+
+## Quark egress proxy
+
+Set the `QUARK_PROXY` secret to an HTTP(S) proxy and only the Quark leg is
+routed through it; Google Drive keeps going direct. This is the highest-leverage
+knob when the runner's own route to the mainland CDN is the bottleneck — a
+proxy or VM in Hong Kong, Singapore, Japan, or Korea is usually several times
+faster than a US runner, and an optimized China route (CN2 GIA and similar)
+helps even from the US.
+
+`--quark-proxy` overrides the environment variable. Proxy credentials are
+redacted from logs, and the value belongs in a secret, never in
+`requests/current.json`.
 
 ## Runtime behavior
 

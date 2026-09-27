@@ -168,3 +168,38 @@ and `tests/test_gdrive.py`): retry/backoff with fresh URLs, stream resume from a
 committed offset, single-file failure isolation, failure sweeps, same-name and
 same-size skip semantics during a retry, runtime-budget deferral, CLI exit codes,
 and the Drive session status probe.
+
+## 2026-09-27 Throughput work
+
+Measured baseline from the verified end-to-end run: **2.2 MB/s on one TCP
+stream** (7.5 s per 16 MiB chunk, no variance), which is a per-stream ceiling
+for an overseas runner pulling from a mainland CDN. With 20.09 GiB and 488
+files that is about 2.6 hours, and the size distribution is extremely skewed —
+one 5.77 GiB file alone is 28.7% of the package and would occupy a single
+stream for ~45 minutes.
+
+Changes:
+
+- `concurrency` (default 4): files are transferred in parallel. Each file keeps
+  its own download URL and Drive resumable session, so the only shared state is
+  the rotating cookie, the Drive access token, the destination folder cache, and
+  the event stream — each now guarded by a lock. The run budget is checked
+  before each submission, and a worker never raises into the pool.
+- `prefetch` (default 3, for files ≥ `prefetch-min-mib`): several Range chunks
+  are fetched from the CDN at once while the Drive upload consumes them strictly
+  in order, removing the single-stream floor for the multi-GB files. The window
+  is rebuilt from the committed offset on every retry attempt.
+- `chunk_mib` default raised to 64 for fewer round trips.
+- Connect-class failures (`ConnectTimeout`, `ConnectionError`, `ProxyError`,
+  rejected signed URLs) now retry immediately against a fresh URL instead of
+  sleeping out the first backoff step.
+- `QUARK_PROXY` / `--quark-proxy`: an optional egress proxy applied to the Quark
+  leg only. This is the highest-leverage knob when the runner's own route to the
+  mainland CDN is the bottleneck. Proxy credentials are redacted from logs.
+
+Coverage added: real parallelism (a barrier proves two files are in flight at
+once), one subfolder created once under three workers, failure isolation inside a
+parallel sweep, prefetch overlap with strictly sequential Drive chunk order,
+prefetch failure resuming at the committed offset, small files staying on the
+serial path, immediate retry for connect failures but not read timeouts, proxy
+application, `QUARK_PROXY` parsing, and proxy-credential redaction.
