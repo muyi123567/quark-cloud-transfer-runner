@@ -115,19 +115,46 @@ def test_resolve_path_uses_exact_segment_names() -> None:
     assert item.name == "武忠祥.pdf"
 
 
-def test_search_is_recursive_and_files_only() -> None:
-    client = QuarkClient("__puus=secret", session=FakeSession())  # type: ignore[arg-type]
+def test_search_uses_global_endpoint_and_filters_files() -> None:
+    session = FakeSession()
+    session.responses = [
+        FakeResponse(
+            {
+                "code": 0,
+                "data": {
+                    "list": [
+                        {
+                            "fid": "d1",
+                            "file_name": "武忠祥资料",
+                            "file_type": 0,
+                            "size": 0,
+                        },
+                        {
+                            "fid": "f1",
+                            "file_name": "武忠祥基础.pdf",
+                            "file_type": 1,
+                            "size": 10,
+                            "file_path": "/转存的内容/武忠祥基础.pdf",
+                        },
+                        {
+                            "fid": "f2",
+                            "file_name": "英语.pdf",
+                            "file_type": 1,
+                            "size": 11,
+                        },
+                    ]
+                },
+            }
+        )
+    ]
+    client = QuarkClient("__puus=secret", session=session)  # type: ignore[arg-type]
 
-    def fake_list_dir(parent_fid: str, page_size: int = 100):
-        if parent_fid == "0":
-            yield QuarkItem("d1", "数学", "/数学", 0, True)
-        else:
-            yield QuarkItem("f1", "武忠祥基础.pdf", "/数学/武忠祥基础.pdf", 10, False)
-            yield QuarkItem("f2", "英语.pdf", "/数学/英语.pdf", 11, False)
-
-    client.list_dir = fake_list_dir  # type: ignore[method-assign]
     hits = client.search("武忠祥", max_depth=2)
+
     assert [item.fid for item in hits] == ["f1"]
+    assert hits[0].path == "/转存的内容/武忠祥基础.pdf"
+    assert session.get_calls[0]["url"].endswith("/file/search")
+    assert session.get_calls[0]["params"]["q"] == "武忠祥"
 
 
 def test_probe_range_checks_content_range_total() -> None:
