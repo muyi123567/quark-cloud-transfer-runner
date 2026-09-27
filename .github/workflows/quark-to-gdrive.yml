@@ -81,7 +81,7 @@ permissions:
 
 concurrency:
   group: quark-to-gdrive
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   transfer:
