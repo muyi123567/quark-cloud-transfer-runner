@@ -1,11 +1,17 @@
 {
-  "request_id": "2026-09-27-daguan-usage-docs-archive-complete",
-  "query": "澄潇宇数学大观系列使用说明.pdf",
-  "source_path": "",
+  "request_id": "2026-09-27-daguan-incremental-dryrun-v1",
+  "mode": "incremental",
+  "query": "",
+  "source_path": "/来自：分享/澄潇宇数学大观",
   "source_fid": "",
-  "destination": "考研_AI_KB/01_SOURCE_INBOX/数学/澄潇宇数学大观/大观使用说明",
+  "destination": "考研_AI_KB/01_SOURCE_INBOX/数学/澄潇宇数学大观",
   "dry_run": true,
-  "max_files": 2,
+  "max_files": 1000,
   "chunk_mib": 16,
-  "duplicate_policy": "skip"
+  "duplicate_policy": "skip",
+  "file_retries": 6,
+  "retry_rounds": 2,
+  "max_runtime_minutes": 300,
+  "concurrency": 4,
+  "prefetch": 3
 }
