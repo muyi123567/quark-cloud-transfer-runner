@@ -1,17 +1,17 @@
 {
-  "request_id": "2026-10-28-drive-connection-check",
-  "mode": "incremental",
-  "query": "",
-  "source_path": "/来自：分享/澄潇宇数学大观",
+  "request_id": "2026-10-28-math-priority-30jiang",
+  "mode": "full",
+  "query": "30讲",
+  "source_path": "",
   "source_fid": "",
-  "destination": "考研_AI_KB/01_SOURCE_INBOX/数学/澄潇宇数学大观",
+  "destination": "考研_AI_KB/01_SOURCE_INBOX/数学",
   "dry_run": true,
   "max_files": 1000,
   "chunk_mib": 16,
   "duplicate_policy": "skip",
-  "file_retries": 6,
-  "retry_rounds": 2,
-  "max_runtime_minutes": 60,
-  "concurrency": 4,
-  "prefetch": 3
+  "file_retries": 2,
+  "retry_rounds": 0,
+  "max_runtime_minutes": 10,
+  "concurrency": 2,
+  "prefetch": 1
 }
