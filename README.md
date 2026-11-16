@@ -377,3 +377,38 @@ max_pages_per_chunk: 60
 This worker reuses the existing `GDRIVE_OAUTH_JSON` and
 `GDRIVE_ROOT_FOLDER_ID` GitHub Actions secrets. No new Google credential is
 required.
+
+## Private Sites R2 transfer
+
+Use the Site's exact MCP endpoint from its connection settings in
+`SITES_MCP_URL`. Supply an owner OAuth bearer authorized for the corresponding
+MCP resource through the secret environment variable `SITES_MCP_OWNER_TOKEN`.
+The endpoint challenges for `openid resource.invoke email`. A Sites dispatch
+service-access token alone received HTTP 401 at the owner MCP endpoint during
+verification. Obtain and refresh the MCP bearer through the authorized
+connection. This CLI does not issue or refresh owner OAuth tokens.
+
+```sh
+quark-cloud-transfer --backend sites-r2 --source-fid YOUR_QUARK_FID --destination '27考研/数学'
+quark-cloud-transfer sites-list
+quark-cloud-transfer sites-download --key 'EXACT_KEY_FROM_RECEIPT' --output './file.pdf'
+```
+
+Upload uses the existing Quark selection, file retry, concurrency and Range
+prefetch. The Sites API requires SHA-256 for the entire file and every 1 MiB
+part before initialization, so the worker stages one complete source file on
+temporary disk per active file. Rerunning the same source FID, name, destination
+and content reuses the same session identity and skips durable parts while
+the server accepts the session. An expired session is subject to server policy.
+The returned object key is assigned by Sites. Pass the UTC
+`storage_verified` receipt, including original FID and path, object key and
+SHA-256, to the existing index. The CLI does not write a second index.
+
+Downloads on POSIX save progress to a locked partial file, request authorized
+128 KiB ranges and publish the output only after matching byte count and
+SHA-256. Existing outputs are protected from replacement. For a Site exposing
+legacy tools, `sites-list --legacy-start 0` lists the allowlisted entries and
+`sites-download --legacy` reads a key from that allowlist.
+
+The existing workflow is unchanged. The new mode needs independent owner
+OAuth verification in the execution environment before automation.

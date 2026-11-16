@@ -24,3 +24,4 @@ class TransferResult:
     drive_id: Optional[str] = None
     drive_name: Optional[str] = None
     error: Optional[str] = None
+    object_key: Optional[str] = None

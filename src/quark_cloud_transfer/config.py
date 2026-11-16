@@ -81,6 +81,7 @@ def _validate_chunk_size(chunk_size: int) -> None:
 def load_settings(
     *,
     require_drive: bool = True,
+    use_drive: bool = True,
     chunk_mib: int = DEFAULT_CHUNK_MIB,
     max_files: int = DEFAULT_MAX_FILES,
     max_depth: int = DEFAULT_MAX_DEPTH,
@@ -106,7 +107,7 @@ def load_settings(
         "GDRIVE_OAUTH_JSON",
         "GDRIVE_OAUTH_JSON_B64",
         required=require_drive,
-    )
+    ) if use_drive else None
     oauth = _parse_oauth_json(oauth_raw)
 
     # Optional egress for the Quark CDN leg only. Keep it in a secret: a proxy

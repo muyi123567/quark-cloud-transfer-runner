@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import mimetypes
+import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Optional
 
@@ -15,6 +18,7 @@ from .gdrive import GoogleDriveClient
 from .models import QuarkItem, TransferResult
 from .quark import QuarkClient
 from .redaction import redact_text
+from .storage import StorageAdapter
 
 EventSink = Callable[..., None]
 
@@ -85,6 +89,7 @@ class TransferService:
         duplicate_policy: str,
         drive_root_id: str = "root",
         emit: EventSink,
+        storage: Optional[StorageAdapter] = None,
         file_attempts: int = DEFAULT_FILE_ATTEMPTS,
         file_backoff_seconds: Sequence[float] = DEFAULT_FILE_BACKOFF_SECONDS,
         retry_rounds: int = DEFAULT_RETRY_ROUNDS,
@@ -111,7 +116,10 @@ class TransferService:
         if prefetch_min_bytes < 0:
             raise TransferError("prefetch_min_bytes cannot be negative")
         self.quark = quark
+        if drive is not None and storage is not None:
+            raise TransferError("Select one storage destination")
         self.drive = drive
+        self.storage = storage
         self.chunk_size = chunk_size
         self.max_files = max_files
         self.max_depth = max_depth
@@ -247,15 +255,17 @@ class TransferService:
                 )
                 for item in items
             ]
-        if self.drive is None:
-            raise TransferError("Google Drive client is required for a non-dry-run transfer")
-
         started = self._clock()
-        parent_id = self.drive.ensure_folder_path(
-            destination,
-            root_id=self.drive_root_id,
-        )
-        self.emit("drive_folder_ready", destination=destination, folder_id=parent_id)
+        if self.storage is not None:
+            parent_id = destination
+        else:
+            if self.drive is None:
+                raise TransferError("A storage destination is required for a non-dry-run transfer")
+            parent_id = self.drive.ensure_folder_path(
+                destination,
+                root_id=self.drive_root_id,
+            )
+            self.emit("drive_folder_ready", destination=destination, folder_id=parent_id)
 
         outcomes: dict[str, TransferResult] = {}
         folder_cache: dict[str, str] = {"": parent_id}
@@ -327,6 +337,7 @@ class TransferService:
                     "status": result.status,
                     "name": result.name,
                     "drive_id": result.drive_id,
+                    **({"object_key": result.object_key} if result.object_key else {}),
                     "size": result.source_size,
                 }
                 for result in results
@@ -462,6 +473,8 @@ class TransferService:
         relative_parent = relative_path.rsplit("/", 1)[0] if "/" in relative_path else ""
         if not relative_parent:
             return parent_id
+        if self.storage is not None:
+            return parent_id.rstrip("/") + "/" + relative_parent
         # Serialize the check-and-create so two workers cannot race into two
         # folders with the same name.
         with self._folder_lock:
@@ -492,7 +505,6 @@ class TransferService:
         returned as a ``failed`` result instead of raised, so a single bad file
         cannot abort the remaining files in the batch.
         """
-        assert self.drive is not None
         state = _UploadState()
         last_error: Optional[str] = None
         last_exception: Optional[BaseException] = None
@@ -520,6 +532,8 @@ class TransferService:
                 )
                 self._sleep(delay)
             try:
+                if self.storage is not None:
+                    return self._attempt_storage_file(item, parent_id)
                 return self._attempt_file(
                     item,
                     parent_id,
@@ -551,6 +565,49 @@ class TransferService:
             source_size=item.size,
             source_path=item.path,
             error=last_error,
+        )
+
+    def _attempt_storage_file(self, item: QuarkItem, destination: str) -> TransferResult:
+        assert self.storage is not None
+        metadata = self.quark.get_download_items([item.fid])[0]
+        url = str(metadata.get("download_url") or "")
+        size = int(metadata.get("size") or item.size or 0)
+        if not url or size <= 0 or (item.size and size != item.size):
+            raise TransferError("Quark source is empty or changed since selection")
+
+        # Sites requires the whole-file and per-part digests before accepting
+        # bytes. Stage one file on disk per worker to avoid rereading the CDN.
+        with tempfile.TemporaryFile() as staged:
+            if self.quark.probe_range(url, size):
+                with closing(self._range_blocks(url, size, start=0)) as blocks:
+                    for data in blocks:
+                        staged.write(data)
+            else:
+                with self.quark.open_stream(url) as response:
+                    for block in response.iter_content(self.chunk_size):
+                        if staged.tell() + len(block) > size:
+                            raise QuarkCdnError("Quark stream exceeded the expected size")
+                        staged.write(block)
+            if staged.tell() != size:
+                raise QuarkCdnError("Quark stream ended before the expected size")
+            name = str(metadata.get("file_name") or metadata.get("name") or item.name)
+            selected = QuarkItem(item.fid, name, item.path, size, False)
+            stored = self.storage.upload(selected, destination, staged)
+
+        self.emit(
+            "storage_verified",
+            source_fid=item.fid,
+            source_path=item.path,
+            name=name,
+            destination=destination,
+            object_key=stored.key,
+            size=stored.size,
+            sha256=stored.sha256,
+            verified_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return TransferResult(
+            status="ok", name=name, source_size=size, source_path=item.path,
+            object_key=stored.key,
         )
 
     def _attempt_file(
@@ -682,6 +739,35 @@ class TransferService:
             drive_name=str(verified.get("name") or name),
         )
 
+    def _range_blocks(self, url: str, size: int, *, start: int) -> Iterator[bytes]:
+        """Pull ordered source blocks with a bounded prefetch window."""
+        depth = self._prefetch_depth(size)
+        offsets = iter(range(start, size, self.chunk_size))
+
+        def fetch(offset: int) -> bytes:
+            return self.quark.fetch_range(url, offset, min(offset + self.chunk_size, size) - 1)
+
+        if depth <= 1:
+            for offset in offsets:
+                yield fetch(offset)
+            return
+
+        pool = ThreadPoolExecutor(max_workers=depth, thread_name_prefix="quark-range")
+        window: dict[int, Future] = {}
+        try:
+            for offset in offsets:
+                window[offset] = pool.submit(fetch, offset)
+                if len(window) == depth:
+                    break
+            while window:
+                oldest = next(iter(window))
+                yield window.pop(oldest).result()
+                following = next(offsets, None)
+                if following is not None:
+                    window[following] = pool.submit(fetch, following)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+
     def _upload_range(
         self,
         session_url: str,
@@ -691,49 +777,10 @@ class TransferService:
         *,
         start: int = 0,
     ) -> dict[str, Any]:
-        """Upload by Range, downloading several chunks ahead of the upload.
-
-        Drive requires resumable chunks strictly in order, so only the *fetch*
-        side is parallelized: a bounded window of chunks is pulled from the CDN
-        while the upload consumes them one by one. A single cross-border
-        connection to the Quark CDN is the throughput ceiling, and this is what
-        lifts it for the few very large files.
-        """
-
         assert self.drive is not None
-        depth = self._prefetch_depth(size)
-        if depth <= 1:
-            return self._upload_range_serial(
-                session_url,
-                source_url,
-                size,
-                name,
-                start=start,
-            )
-
         uploaded = start
-        final: Optional[dict[str, Any]] = None
-        pool = ThreadPoolExecutor(max_workers=depth, thread_name_prefix="quark-range")
-        window: dict[int, Future] = {}
-        next_offset = start
-        try:
-            while uploaded < size:
-                while len(window) < depth and next_offset < size:
-                    end = min(next_offset + self.chunk_size, size) - 1
-                    window[next_offset] = pool.submit(
-                        self.quark.fetch_range,
-                        source_url,
-                        next_offset,
-                        end,
-                    )
-                    next_offset = end + 1
-                future = window.pop(uploaded)
-                try:
-                    data = future.result()
-                except BaseException:
-                    for outstanding in window.values():
-                        outstanding.cancel()
-                    raise
+        with closing(self._range_blocks(source_url, size, start=start)) as blocks:
+            for data in blocks:
                 response = self.drive.put_chunk(
                     session_url,
                     start=uploaded,
@@ -750,48 +797,10 @@ class TransferService:
                 )
                 if response.status_code in (200, 201):
                     final = dict(response.json())
+                    if final and uploaded == size:
+                        return final
                     break
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
-        if not final or uploaded != size:
-            raise TransferError("Drive did not finalize the ranged upload")
-        return final
-
-    def _upload_range_serial(
-        self,
-        session_url: str,
-        source_url: str,
-        size: int,
-        name: str,
-        *,
-        start: int = 0,
-    ) -> dict[str, Any]:
-        assert self.drive is not None
-        uploaded = start
-        final: Optional[dict[str, Any]] = None
-        while uploaded < size:
-            end = min(uploaded + self.chunk_size, size) - 1
-            data = self.quark.fetch_range(source_url, uploaded, end)
-            response = self.drive.put_chunk(
-                session_url,
-                start=uploaded,
-                total=size,
-                data=data,
-            )
-            uploaded += len(data)
-            self.emit(
-                "progress",
-                name=name,
-                uploaded=uploaded,
-                total=size,
-                percent=round(uploaded * 100 / size, 2),
-            )
-            if response.status_code in (200, 201):
-                final = dict(response.json())
-                break
-        if not final or uploaded != size:
-            raise TransferError("Drive did not finalize the ranged upload")
-        return final
+        raise TransferError("Drive did not finalize the ranged upload")
 
     def _upload_stream(
         self,

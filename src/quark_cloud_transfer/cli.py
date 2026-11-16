@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
+from pathlib import Path
 from typing import Optional
 
 from .config import (
@@ -18,6 +21,7 @@ from .quark import (
     QuarkClient,
 )
 from .redaction import redact_text
+from .sites_r2 import SitesR2
 from .transfer import (
     DEFAULT_CONCURRENCY,
     DEFAULT_FILE_ATTEMPTS,
@@ -38,13 +42,15 @@ def emit(event: str, **payload: object) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Stream Quark Drive files into Google Drive without full local staging."
+        description="Transfer Quark files to a configured storage destination."
     )
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--query", help="Case-insensitive Quark filename substring.")
     selection.add_argument("--source-path", help="Exact Quark path to a file or folder.")
     selection.add_argument("--source-fid", help="Exact 32-character Quark Web FID.")
-    parser.add_argument("--destination", required=True, help="Google Drive folder path.")
+    parser.add_argument("--backend", choices=("drive", "sites-r2"), default="drive")
+    parser.add_argument("--destination", required=True, help="Destination folder or logical path.")
+    parser.epilog = "Use sites-download or sites-list for Sites R2 reads."
     parser.add_argument(
         "--mode",
         choices=("full", "incremental"),
@@ -125,12 +131,47 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _sites_client() -> SitesR2:
+    return SitesR2(os.getenv("SITES_MCP_URL", ""), os.getenv("SITES_MCP_OWNER_TOKEN", ""))
+
+
+def _sites_read(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog=f"quark-cloud-transfer {argv[0]}")
+    if argv[0] == "sites-download":
+        parser.add_argument("--key", required=True)
+        parser.add_argument("--output", type=Path, required=True)
+        parser.add_argument("--legacy", action="store_true", help="Use the Site legacy allowlist.")
+        args = parser.parse_args(argv[1:])
+        result = _sites_client().download(args.key, args.output, legacy=args.legacy)
+        emit("storage_download_verified", object_key=result.key, size=result.size, sha256=result.sha256)
+    else:
+        paging = parser.add_mutually_exclusive_group()
+        paging.add_argument("--cursor")
+        paging.add_argument("--legacy-start", type=int)
+        args = parser.parse_args(argv[1:])
+        client = _sites_client()
+        inventory = (
+            client.list(args.cursor) if args.legacy_start is None
+            else client.legacy_inventory(args.legacy_start)
+        )
+        emit("storage_inventory", **inventory)
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
     try:
+        if argv and argv[0] in {"sites-list", "sites-download"}:
+            return _sites_read(argv)
+        args = build_parser().parse_args(argv)
+        use_drive = args.backend == "drive"
+        if not use_drive and args.mode == "incremental":
+            raise ValueError("The Drive inventory-based incremental mode is unavailable for Sites R2")
+        storage = _sites_client() if not use_drive and not args.dry_run else None
         if args.mode == "incremental" and not args.source_path:
             raise ValueError("incremental mode requires --source-path")
         settings = load_settings(
+            use_drive=use_drive,
             require_drive=(args.mode == "incremental" or not args.dry_run),
             chunk_mib=args.chunk_mib,
             max_files=args.max_files,
@@ -148,7 +189,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         drive = (
             GoogleDriveClient(settings.gdrive_oauth or {})
-            if args.mode == "incremental" or not args.dry_run
+            if use_drive and (args.mode == "incremental" or not args.dry_run)
             else None
         )
         service = TransferService(
@@ -161,6 +202,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             duplicate_policy=settings.duplicate_policy,
             drive_root_id=settings.gdrive_root_folder_id,
             emit=emit,
+            storage=storage,
             file_attempts=args.file_attempts,
             retry_rounds=args.retry_rounds,
             retry_round_delay_seconds=args.retry_round_delay,
