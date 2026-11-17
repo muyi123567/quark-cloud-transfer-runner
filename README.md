@@ -1,3 +1,5 @@
+> Google Drive is retired. The CLI defaults to Sites R2. The historical Drive instructions below are retained for reference.
+
 # Quark Cloud Transfer
 
 `quark-cloud-transfer` is a GitHub Actions runtime asset that streams files from

@@ -14,7 +14,6 @@ from .config import (
     DEFAULT_MAX_NODES,
     load_settings,
 )
-from .gdrive import GoogleDriveClient
 from .quark import (
     CDN_CONNECT_TIMEOUT_SECONDS,
     CDN_READ_TIMEOUT_SECONDS,
@@ -48,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--query", help="Case-insensitive Quark filename substring.")
     selection.add_argument("--source-path", help="Exact Quark path to a file or folder.")
     selection.add_argument("--source-fid", help="Exact 32-character Quark Web FID.")
-    parser.add_argument("--backend", choices=("drive", "sites-r2"), default="drive")
+    parser.add_argument("--backend", choices=("sites-r2",), default="sites-r2")
     parser.add_argument("--destination", required=True, help="Destination folder or logical path.")
     parser.epilog = "Use sites-download or sites-list for Sites R2 reads."
     parser.add_argument(
@@ -164,15 +163,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         if argv and argv[0] in {"sites-list", "sites-download"}:
             return _sites_read(argv)
         args = build_parser().parse_args(argv)
-        use_drive = args.backend == "drive"
-        if not use_drive and args.mode == "incremental":
+        if args.mode == "incremental":
             raise ValueError("The Drive inventory-based incremental mode is unavailable for Sites R2")
-        storage = _sites_client() if not use_drive and not args.dry_run else None
-        if args.mode == "incremental" and not args.source_path:
-            raise ValueError("incremental mode requires --source-path")
+        storage = _sites_client() if not args.dry_run else None
         settings = load_settings(
-            use_drive=use_drive,
-            require_drive=(args.mode == "incremental" or not args.dry_run),
+            use_drive=False,
+            require_drive=False,
             chunk_mib=args.chunk_mib,
             max_files=args.max_files,
             max_depth=args.max_depth,
@@ -187,14 +183,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             cdn_read_timeout=args.cdn_read_timeout,
             proxy=quark_proxy,
         )
-        drive = (
-            GoogleDriveClient(settings.gdrive_oauth or {})
-            if use_drive and (args.mode == "incremental" or not args.dry_run)
-            else None
-        )
         service = TransferService(
             quark,
-            drive,
+            None,
             chunk_size=settings.chunk_size,
             max_files=settings.max_files,
             max_depth=settings.max_depth,
@@ -211,37 +202,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             prefetch=args.prefetch,
             prefetch_min_bytes=int(args.prefetch_min_mib * 1024 * 1024),
         )
-        if args.mode == "incremental":
-            from .incremental import IncrementalSyncService
-
-            incremental = IncrementalSyncService(service)
-            plan = incremental.run(
-                source_path=args.source_path or "",
-                destination=args.destination,
-                dry_run=args.dry_run,
-                root_fid=args.quark_root_fid,
-            )
-            unresolved = [
-                item
-                for item in plan
-                if item.status == "conflict"
-            ]
-            if not unresolved:
-                return 0
-            emit(
-                "incomplete",
-                conflicts=len(unresolved),
-                files=[
-                    {
-                        "path": item.logical_path,
-                        "status": item.status,
-                        "error": item.reason,
-                    }
-                    for item in unresolved
-                ],
-            )
-            return 3
-
         results = service.run(
             destination=args.destination,
             dry_run=args.dry_run,

@@ -518,16 +518,8 @@ def run_cli(monkeypatch: pytest.MonkeyPatch, results: list[TransferResult], caps
     StubService.results = results
     monkeypatch.setattr(cli, "TransferService", StubService)
     monkeypatch.setenv("QUARK_COOKIE", "auth=1; __puus=secret")
-    monkeypatch.setenv(
-        "GDRIVE_OAUTH_JSON",
-        json.dumps(
-            {
-                "client_id": "client",
-                "client_secret": "secret",
-                "refresh_token": "refresh",
-            }
-        ),
-    )
+    monkeypatch.setenv("SITES_MCP_URL", "https://example.invalid/mcp")
+    monkeypatch.setenv("SITES_MCP_OWNER_TOKEN", "test-token")
     code = cli.main(["--query", "a", "--destination", "inbox"])
     return code, capsys.readouterr().out
 
@@ -772,14 +764,9 @@ def test_cli_wires_the_resilience_knobs_into_the_service(monkeypatch, capsys) ->
 
     monkeypatch.setattr(cli, "TransferService", RecordingService)
     monkeypatch.setattr(cli, "QuarkClient", lambda cookie, **kwargs: ("quark", kwargs))
-    monkeypatch.setattr(cli, "GoogleDriveClient", lambda oauth: "drive")
     monkeypatch.setenv("QUARK_COOKIE", "auth=1; __puus=secret")
-    monkeypatch.setenv(
-        "GDRIVE_OAUTH_JSON",
-        json.dumps(
-            {"client_id": "c", "client_secret": "s", "refresh_token": "r"}
-        ),
-    )
+    monkeypatch.setenv("SITES_MCP_URL", "https://example.invalid/mcp")
+    monkeypatch.setenv("SITES_MCP_OWNER_TOKEN", "test-token")
 
     code = cli.main(
         [
@@ -832,16 +819,21 @@ def test_cli_wires_the_resilience_knobs_into_the_service(monkeypatch, capsys) ->
 def test_cli_runs_a_real_service_against_fake_clients(monkeypatch, capsys) -> None:
     item = QuarkItem("fid-1", "a.bin", "/a.bin", 4, False)
     quark = ResilientQuark([item])
-    drive = RecordingDrive()
+    from quark_cloud_transfer.storage import StoredObject
+
+    uploaded = []
+
+    class Storage:
+        def upload(self, item, destination, source):
+            source.seek(0)
+            uploaded.append((item.fid, destination, source.read()))
+            return StoredObject("files/a.bin", 4, "test-digest")
+
     monkeypatch.setattr(cli, "QuarkClient", lambda cookie, **kwargs: quark)
-    monkeypatch.setattr(cli, "GoogleDriveClient", lambda oauth: drive)
+    monkeypatch.setattr(cli, "_sites_client", Storage)
     monkeypatch.setenv("QUARK_COOKIE", "auth=1; __puus=secret")
-    monkeypatch.setenv(
-        "GDRIVE_OAUTH_JSON",
-        json.dumps(
-            {"client_id": "c", "client_secret": "s", "refresh_token": "r"}
-        ),
-    )
+    monkeypatch.setenv("SITES_MCP_URL", "https://example.invalid/mcp")
+    monkeypatch.setenv("SITES_MCP_OWNER_TOKEN", "test-token")
 
     code = cli.main(
         [
@@ -860,4 +852,5 @@ def test_cli_runs_a_real_service_against_fake_clients(monkeypatch, capsys) -> No
     assert code == 0
     assert '"event": "summary"' in out
     assert '"ok": 1' in out
-    assert drive.chunks and drive.chunks[0][1] == 0
+    assert uploaded and uploaded[0][:2] == ("fid-1", "inbox")
+    assert len(uploaded[0][2]) == 4

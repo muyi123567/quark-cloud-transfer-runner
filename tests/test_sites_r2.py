@@ -118,16 +118,12 @@ def test_sites_cli_transfers_without_drive_and_preserves_fid(monkeypatch, capsys
             assert source.read() == data
             return StoredObject("files/example", len(data), fingerprint)
 
-    def reject_drive(*args, **kwargs):
-        pytest.fail("Drive client constructed in Sites R2 mode")
-
     monkeypatch.setenv("QUARK_COOKIE", "__puus=test")
     monkeypatch.setenv("GDRIVE_OAUTH_JSON", "invalid json")
     monkeypatch.setattr(cli, "QuarkClient", Quark)
-    monkeypatch.setattr(cli, "GoogleDriveClient", reject_drive)
     monkeypatch.setattr(cli, "_sites_client", Adapter)
     assert cli.main([
-        "--backend", "sites-r2", "--source-fid", "original-fid", "--destination", "27考研/数学",
+        "--source-fid", "original-fid", "--destination", "27考研/数学",
     ]) == 0
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     receipt = next(event for event in events if event["event"] == "storage_verified")
